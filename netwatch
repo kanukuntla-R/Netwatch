@@ -20,26 +20,57 @@ LOG_FILE     = INSTALL_DIR / "netwatch.log"
 SERVICE      = "netwatch"
 
 # ── Colors ────────────────────────────────────────────────
-R  = "\033[0;31m"
-G  = "\033[0;32m"
-Y  = "\033[1;33m"
-B  = "\033[0;34m"
-C  = "\033[0;36m"
-W  = "\033[1;37m"
-DIM= "\033[2m"
-RST= "\033[0m"
+R   = "\033[0;31m"
+G   = "\033[0;32m"
+Y   = "\033[1;33m"
+B   = "\033[0;34m"
+C   = "\033[0;36m"
+P   = "\033[0;35m"
+OR  = "\033[0;33m"
+W   = "\033[1;37m"
+DIM = "\033[2m"
+RST = "\033[0m"
+BOLD= "\033[1m"
 
 def c(color, text): return f"{color}{text}{RST}"
 
-BANNER = f"""
-{C}  ███╗   ██╗███████╗████████╗██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗
-  ████╗  ██║██╔════╝╚══██╔══╝██║    ██║██╔══██╗╚══██╔══╝██╔════╝██║  ██║
-  ██╔██╗ ██║█████╗     ██║   ██║ █╗ ██║███████║   ██║   ██║     ███████║
-  ██║╚██╗██║██╔══╝     ██║   ██║███╗██║██╔══██║   ██║   ██║     ██╔══██║
-  ██║ ╚████║███████╗   ██║   ╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║
-  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝{RST}
-  {Y}Home Network Monitor — Arch Linux Hub{RST}
-"""
+# ── Command Banners ───────────────────────────────────────
+BANNER_BIG = (
+    f"\n{C}"
+    "  \u2588\u2588\u2588\u2557   \u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2557    \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2557  \u2588\u2588\u2557\n"
+    "  \u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u2550\u2588\u2588\u2554\u2550\u2550\u255d\u2588\u2588\u2551    \u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u255a\u2550\u2550\u2588\u2588\u2554\u2550\u2550\u255d\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d\u2588\u2588\u2551  \u2588\u2588\u2551\n"
+    "  \u2588\u2588\u2554\u2588\u2588\u2557 \u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2557     \u2588\u2588\u2551   \u2588\u2588\u2551 \u2588\u2557 \u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551   \u2588\u2588\u2551   \u2588\u2588\u2551     \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551\n"
+    "  \u2588\u2588\u2551\u255a\u2588\u2588\u2557\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u255d     \u2588\u2588\u2551   \u2588\u2588\u2551\u2588\u2588\u2588\u2557\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551   \u2588\u2588\u2551   \u2588\u2588\u2551     \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551\n"
+    "  \u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557   \u2588\u2588\u2551   \u255a\u2588\u2588\u2588\u2554\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2551  \u2588\u2588\u2551   \u2588\u2588\u2551   \u255a\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2551  \u2588\u2588\u2551\n"
+    "  \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u255d\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u255d   \u255a\u2550\u255d    \u255a\u2550\u2550\u255d\u255a\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u255d   \u255a\u2550\u255d    \u255a\u2550\u2550\u2550\u2550\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d"
+    f"{RST}\n"
+    f"  {Y}Home Network Monitor \u2014 Arch Linux Hub{RST}\n"
+)
+
+def cmd_banner(icon, cmd, color=C):
+    pad = 53 - len(f"  {icon}  N E T W A T C H  \u00b7  {cmd}  ")
+    line = "\u2500" * 55
+    title = f"  {icon}  N E T W A T C H  \u00b7  {cmd}{' ' * max(pad, 1)}"
+    return f"\n{color}\u256d{line}\u256e\n\u2502{title}\u2502\n\u2570{line}\u256f{RST}\n"
+
+def print_banner(cmd):
+    banners = {
+        "status":        lambda: cmd_banner("\u25c9", "status",        C),
+        "devices":       lambda: cmd_banner("\u25a6", "devices",        P),
+        "scan":          lambda: cmd_banner("\u25ce", "scan",           G),
+        "logs":          lambda: cmd_banner("\u2261", "logs",           OR),
+        "label":         lambda: cmd_banner("\u25c8", "label",          Y),
+        "trust":         lambda: cmd_banner("\u25c8", "trust",          Y),
+        "untrust":       lambda: cmd_banner("\u25c8", "untrust",        R),
+        "history":       lambda: cmd_banner("\u23f2", "history",        DIM),
+        "config":        lambda: cmd_banner("\u2699", "config",         C),
+        "test-telegram": lambda: cmd_banner("\u2708", "test-telegram",  B),
+        "help":          lambda: BANNER_BIG,
+        "install":       lambda: BANNER_BIG,
+    }
+    fn = banners.get(cmd)
+    if fn:
+        print(fn())
 
 # ── Helpers ───────────────────────────────────────────────
 def require_root():
@@ -83,6 +114,7 @@ def check_install():
 def cmd_start(args):
     require_root()
     check_install()
+    print_banner("status")
     ok, err = systemctl("start")
     if ok:
         print(c(G, "✓ NetWatch started."))
@@ -103,6 +135,7 @@ def cmd_restart(args):
 
 def cmd_status(args):
     check_install()
+    print_banner("status")
     state = service_status()
     state_colored = c(G, "● running") if state == "active" else c(R, f"● {state}")
     print(f"\n  Service : {state_colored}")
@@ -137,6 +170,7 @@ def cmd_status(args):
 
 def cmd_logs(args):
     check_install()
+    print_banner("logs")
     n = getattr(args, "lines", 50)
     if getattr(args, "follow", False):
         print(c(C, f"  Following NetWatch logs (Ctrl+C to exit)...\n"))
@@ -147,6 +181,7 @@ def cmd_logs(args):
 def cmd_scan(args):
     require_root()
     check_install()
+    print_banner("scan")
     cfg = load_json(CONFIG_FILE, {})
     network = cfg.get("network_range", "192.168.1.0/24")
     print(c(C, f"\n  Scanning {network} ...\n"))
@@ -155,6 +190,7 @@ def cmd_scan(args):
 
 def cmd_devices(args):
     check_install()
+    print_banner("devices")
     devices = load_json(DEVICES_FILE, {})
     if not devices:
         print(c(Y, "  No devices in registry yet. Run: sudo netwatch scan"))
@@ -182,6 +218,7 @@ def cmd_devices(args):
 def cmd_label(args):
     require_root()
     check_install()
+    print_banner("label")
     mac   = args.mac.upper()
     label = args.name
     devices = load_json(DEVICES_FILE, {})
@@ -197,6 +234,7 @@ def cmd_label(args):
 def cmd_trust(args):
     require_root()
     check_install()
+    print_banner("trust")
     mac = args.mac.upper()
     cfg = load_json(CONFIG_FILE, {})
     trusted = [m.upper() for m in cfg.get("trusted_macs", [])]
@@ -211,6 +249,7 @@ def cmd_trust(args):
 def cmd_untrust(args):
     require_root()
     check_install()
+    print_banner("untrust")
     mac = args.mac.upper()
     cfg = load_json(CONFIG_FILE, {})
     trusted = [m.upper() for m in cfg.get("trusted_macs", [])]
@@ -224,6 +263,7 @@ def cmd_untrust(args):
 
 def cmd_history(args):
     check_install()
+    print_banner("history")
     history = load_json(HISTORY_FILE, [])
     if not history:
         print(c(Y, "  No scan history yet."))
@@ -241,6 +281,7 @@ def cmd_history(args):
 
 def cmd_test_telegram(args):
     check_install()
+    print_banner("test-telegram")
     cfg = load_json(CONFIG_FILE, {})
     tg  = cfg.get("alert", {}).get("telegram", {})
     if not tg.get("enabled") or not tg.get("bot_token") or not tg.get("chat_id"):
@@ -263,6 +304,7 @@ def cmd_test_telegram(args):
 
 def cmd_config(args):
     check_install()
+    print_banner("config")
     cfg = load_json(CONFIG_FILE, {})
     print(f"\n  {c(W, 'Current Configuration')}\n")
     print(f"  Network Range   : {c(C, cfg.get('network_range','?'))}")
@@ -282,7 +324,7 @@ def cmd_config(args):
 
 def cmd_install(args):
     require_root()
-    print(BANNER)
+    print_banner("install")
     src = Path(__file__).parent
 
     # Check deps
@@ -342,7 +384,7 @@ def cmd_uninstall(args):
     print(c(DIM, "  To remove data: sudo rm -rf /opt/netwatch"))
 
 def cmd_help(args=None):
-    print(BANNER)
+    print_banner("help")
     cmds = [
         ("start",            "",              "Start the NetWatch daemon"),
         ("stop",             "",              "Stop the daemon"),
