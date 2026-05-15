@@ -1,0 +1,32 @@
+{
+  "network_range": "192.168.1.0/24",
+  "scan_interval_seconds": 60,
+  "nmap_flags": "-sn -O --osscan-guess",
+  "scan_on_start": true,
+  "alert_on_reconnect": false,
+  "log_level": "INFO",
+
+  "trusted_macs": [
+    "AA:BB:CC:DD:EE:FF",
+    "11:22:33:44:55:66"
+  ],
+
+  "alert": {
+    "telegram": {
+      "enabled": false,
+      "bot_token": "YOUR_BOT_TOKEN_HERE",
+      "chat_id": "YOUR_CHAT_ID_HERE"
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "http://localhost:5000/netwatch-event",
+      "secret_header": "my-secret-token"
+    },
+    "local_log": {
+      "enabled": true
+    },
+    "desktop_notify": {
+      "enabled": false
+    }
+  }
+}
