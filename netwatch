@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""
+netwatch — CLI for NetWatch Home Network Monitor
+Usage: netwatch <command> [args]
+"""
+
+import json
+import os
+import sys
+import subprocess
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+INSTALL_DIR  = Path("/opt/netwatch")
+CONFIG_FILE  = INSTALL_DIR / "config.json"
+DEVICES_FILE = INSTALL_DIR / "known_devices.json"
+HISTORY_FILE = INSTALL_DIR / "scan_history.json"
+LOG_FILE     = INSTALL_DIR / "netwatch.log"
+SERVICE      = "netwatch"
+
+# ── Colors ────────────────────────────────────────────────
+R  = "\033[0;31m"
+G  = "\033[0;32m"
+Y  = "\033[1;33m"
+B  = "\033[0;34m"
+C  = "\033[0;36m"
+W  = "\033[1;37m"
+DIM= "\033[2m"
+RST= "\033[0m"
+
+def c(color, text): return f"{color}{text}{RST}"
+
+BANNER = f"""
+{C}  ███╗   ██╗███████╗████████╗██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗
+  ████╗  ██║██╔════╝╚══██╔══╝██║    ██║██╔══██╗╚══██╔══╝██╔════╝██║  ██║
+  ██╔██╗ ██║█████╗     ██║   ██║ █╗ ██║███████║   ██║   ██║     ███████║
+  ██║╚██╗██║██╔══╝     ██║   ██║███╗██║██╔══██║   ██║   ██║     ██╔══██║
+  ██║ ╚████║███████╗   ██║   ╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║
+  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝{RST}
+  {Y}Home Network Monitor — Arch Linux Hub{RST}
+"""
+
+# ── Helpers ───────────────────────────────────────────────
+def require_root():
+    if os.geteuid() != 0:
+        print(c(R, "✗ This command needs root. Run: sudo netwatch " + " ".join(sys.argv[1:])))
+        sys.exit(1)
+
+def load_json(path, default=None):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default if default is not None else {}
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+
+def systemctl(action):
+    result = subprocess.run(
+        ["systemctl", action, SERVICE],
+        capture_output=True, text=True
+    )
+    return result.returncode == 0, result.stderr.strip()
+
+def service_status() -> str:
+    result = subprocess.run(
+        ["systemctl", "is-active", SERVICE],
+        capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+def check_install():
+    if not INSTALL_DIR.exists() or not (INSTALL_DIR / "network_monitor.py").exists():
+        print(c(R, "✗ NetWatch not installed. Run: sudo netwatch install"))
+        sys.exit(1)
+
+
+# ── Commands ──────────────────────────────────────────────
+
+def cmd_start(args):
+    require_root()
+    check_install()
+    ok, err = systemctl("start")
+    if ok:
+        print(c(G, "✓ NetWatch started."))
+        cmd_status(args)
+    else:
+        print(c(R, f"✗ Failed to start: {err}"))
+
+def cmd_stop(args):
+    require_root()
+    ok, err = systemctl("stop")
+    print(c(Y, "◼ NetWatch stopped.") if ok else c(R, f"✗ {err}"))
+
+def cmd_restart(args):
+    require_root()
+    check_install()
+    ok, err = systemctl("restart")
+    print(c(G, "↺ NetWatch restarted.") if ok else c(R, f"✗ {err}"))
+
+def cmd_status(args):
+    check_install()
+    state = service_status()
+    state_colored = c(G, "● running") if state == "active" else c(R, f"● {state}")
+    print(f"\n  Service : {state_colored}")
+
+    # uptime from systemctl show
+    r = subprocess.run(
+        ["systemctl", "show", SERVICE, "--property=ActiveEnterTimestamp"],
+        capture_output=True, text=True
+    )
+    for line in r.stdout.splitlines():
+        if "ActiveEnterTimestamp=" in line:
+            ts = line.split("=", 1)[1].strip()
+            print(f"  Since   : {c(DIM, ts)}")
+
+    devices = load_json(DEVICES_FILE, {})
+    history = load_json(HISTORY_FILE, [])
+    last_scan = history[-1] if history else None
+
+    print(f"  Known   : {c(W, str(len(devices)))} device(s)")
+    if last_scan:
+        print(f"  Last scan: {c(DIM, last_scan.get('timestamp','?'))}  —  "
+              f"{c(W, str(last_scan.get('total_found', '?')))} online")
+
+    if devices:
+        print(f"\n  {'MAC':<20} {'IP':<16} {'Label / Hostname':<26} {'Last Seen'}")
+        print(f"  {'─'*85}")
+        for mac, d in devices.items():
+            label = d.get("label") or d.get("hostname") or c(DIM, "—")
+            trusted = c(G, "✓") if d.get("trusted") else c(Y, "?")
+            print(f"  {trusted} {mac:<20} {d.get('ip','?'):<16} {label:<26} {c(DIM, d.get('last_seen','?'))}")
+    print()
+
+def cmd_logs(args):
+    check_install()
+    n = getattr(args, "lines", 50)
+    if getattr(args, "follow", False):
+        print(c(C, f"  Following NetWatch logs (Ctrl+C to exit)...\n"))
+        os.execlp("journalctl", "journalctl", "-u", SERVICE, "-f", "--no-pager")
+    else:
+        subprocess.run(["journalctl", "-u", SERVICE, "-n", str(n), "--no-pager"])
+
+def cmd_scan(args):
+    require_root()
+    check_install()
+    cfg = load_json(CONFIG_FILE, {})
+    network = cfg.get("network_range", "192.168.1.0/24")
+    print(c(C, f"\n  Scanning {network} ...\n"))
+    subprocess.run(["nmap", "-sn", "-T4", network])
+    print()
+
+def cmd_devices(args):
+    check_install()
+    devices = load_json(DEVICES_FILE, {})
+    if not devices:
+        print(c(Y, "  No devices in registry yet. Run: sudo netwatch scan"))
+        return
+
+    print(f"\n  {c(W, 'All known devices')} ({len(devices)} total)\n")
+    print(f"  {'#':<4} {'Status':<8} {'IP':<16} {'MAC':<20} {'Vendor':<22} {'OS':<30} {'Label'}")
+    print(f"  {'─'*115}")
+
+    history = load_json(HISTORY_FILE, [])
+    online_ips = set()
+    if history:
+        for d in history[-1].get("devices", []):
+            online_ips.add(d.get("ip"))
+
+    for i, (mac, d) in enumerate(devices.items(), 1):
+        is_online = d.get("ip") in online_ips
+        status    = c(G, "online ") if is_online else c(DIM, "offline")
+        label     = d.get("label") or c(DIM, "—")
+        os_g      = d.get("os_guess") or c(DIM, "—")
+        vendor    = d.get("vendor") or c(DIM, "Unknown")
+        print(f"  {i:<4} {status}  {d.get('ip','?'):<16} {mac:<20} {vendor:<22} {os_g:<30} {label}")
+    print()
+
+def cmd_label(args):
+    require_root()
+    check_install()
+    mac   = args.mac.upper()
+    label = args.name
+    devices = load_json(DEVICES_FILE, {})
+    if mac not in devices:
+        print(c(R, f"  ✗ MAC {mac} not found in registry."))
+        print(c(DIM, "  Run 'netwatch devices' to see known MACs."))
+        sys.exit(1)
+    devices[mac]["label"]   = label
+    devices[mac]["trusted"] = True
+    save_json(DEVICES_FILE, devices)
+    print(c(G, f"  ✓ {mac}  →  \"{label}\"  (marked trusted)"))
+
+def cmd_trust(args):
+    require_root()
+    check_install()
+    mac = args.mac.upper()
+    cfg = load_json(CONFIG_FILE, {})
+    trusted = [m.upper() for m in cfg.get("trusted_macs", [])]
+    if mac not in trusted:
+        trusted.append(mac)
+        cfg["trusted_macs"] = trusted
+        save_json(CONFIG_FILE, cfg)
+        print(c(G, f"  ✓ {mac} added to trusted list in config."))
+    else:
+        print(c(Y, f"  {mac} is already trusted."))
+
+def cmd_untrust(args):
+    require_root()
+    check_install()
+    mac = args.mac.upper()
+    cfg = load_json(CONFIG_FILE, {})
+    trusted = [m.upper() for m in cfg.get("trusted_macs", [])]
+    if mac in trusted:
+        trusted.remove(mac)
+        cfg["trusted_macs"] = trusted
+        save_json(CONFIG_FILE, cfg)
+        print(c(Y, f"  ✓ {mac} removed from trusted list."))
+    else:
+        print(c(DIM, f"  {mac} was not in trusted list."))
+
+def cmd_history(args):
+    check_install()
+    history = load_json(HISTORY_FILE, [])
+    if not history:
+        print(c(Y, "  No scan history yet."))
+        return
+    n = getattr(args, "count", 10)
+    recent = history[-n:]
+    print(f"\n  {c(W, f'Last {len(recent)} scans')}\n")
+    print(f"  {'Timestamp':<22} {'Online':>8} {'New':>6}")
+    print(f"  {'─'*42}")
+    for h in recent:
+        new_count = h.get("new_count", 0)
+        new_str   = c(R, f"+{new_count}") if new_count > 0 else c(DIM, "  0")
+        print(f"  {h.get('timestamp','?'):<22} {h.get('total_found','?'):>8}    {new_str}")
+    print()
+
+def cmd_test_telegram(args):
+    check_install()
+    cfg = load_json(CONFIG_FILE, {})
+    tg  = cfg.get("alert", {}).get("telegram", {})
+    if not tg.get("enabled") or not tg.get("bot_token") or not tg.get("chat_id"):
+        print(c(Y, "  Telegram is not configured or not enabled in config.json"))
+        return
+    import urllib.request, urllib.parse
+    token   = tg["bot_token"]
+    chat_id = tg["chat_id"]
+    msg     = f"✅ NetWatch test — connection confirmed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    url     = f"https://api.telegram.org/bot{token}/sendMessage"
+    data    = urllib.parse.urlencode({"chat_id": chat_id, "text": msg}).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10) as r:
+            if r.getcode() == 200:
+                print(c(G, "  ✓ Telegram test message sent! Check your phone."))
+            else:
+                print(c(R, f"  ✗ Telegram returned HTTP {r.getcode()}"))
+    except Exception as e:
+        print(c(R, f"  ✗ Telegram test failed: {e}"))
+
+def cmd_config(args):
+    check_install()
+    cfg = load_json(CONFIG_FILE, {})
+    print(f"\n  {c(W, 'Current Configuration')}\n")
+    print(f"  Network Range   : {c(C, cfg.get('network_range','?'))}")
+    print(f"  Scan Interval   : {c(C, str(cfg.get('scan_interval_seconds','?')) + 's')}")
+    print(f"  Nmap Flags      : {c(DIM, cfg.get('nmap_flags','?'))}")
+    print(f"  Alert on Rejoin : {cfg.get('alert_on_reconnect', False)}")
+
+    trusted = cfg.get("trusted_macs", [])
+    print(f"  Trusted MACs    : {c(G, str(len(trusted)))} device(s)")
+    for m in trusted:
+        print(f"    {c(DIM,'•')} {m}")
+
+    tg = cfg.get("alert", {}).get("telegram", {})
+    tg_status = c(G, "enabled") if tg.get("enabled") else c(R, "disabled")
+    print(f"  Telegram        : {tg_status}")
+    print()
+
+def cmd_install(args):
+    require_root()
+    print(BANNER)
+    src = Path(__file__).parent
+
+    # Check deps
+    print(c(B, "[1/4]"), "Checking dependencies...")
+    for dep in ["nmap", "python3"]:
+        r = subprocess.run(["which", dep], capture_output=True)
+        if r.returncode == 0:
+            print(f"  {dep}: {c(G,'✓')}")
+        else:
+            print(f"  {dep}: {c(R,'missing')} — installing...")
+            subprocess.run(["pacman", "-S", "--noconfirm", dep])
+
+    print(c(B, "[2/4]"), f"Creating {INSTALL_DIR} ...")
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+
+    print(c(B, "[3/4]"), "Copying files...")
+    import shutil
+    for fname in ["network_monitor.py", "netwatch"]:
+        src_f = src / fname
+        if src_f.exists():
+            shutil.copy2(src_f, INSTALL_DIR / fname)
+    if not (INSTALL_DIR / "config.json").exists():
+        cfg_src = src / "config.json"
+        if cfg_src.exists():
+            shutil.copy2(cfg_src, INSTALL_DIR / "config.json")
+
+    # Install CLI to PATH
+    cli_dest = Path("/usr/local/bin/netwatch")
+    shutil.copy2(Path(__file__), cli_dest)
+    cli_dest.chmod(0o755)
+    print(f"  CLI installed → {c(G, str(cli_dest))}")
+
+    # Systemd service
+    print(c(B, "[4/4]"), "Installing systemd service...")
+    svc_src = src / "netwatch.service"
+    if svc_src.exists():
+        shutil.copy2(svc_src, "/etc/systemd/system/netwatch.service")
+        subprocess.run(["systemctl", "daemon-reload"])
+        subprocess.run(["systemctl", "enable", SERVICE])
+
+    print(f"\n  {c(G,'✓ Installation complete!')}\n")
+    print(f"  {Y}Next:{RST}")
+    print(f"    netwatch config              — view current config")
+    print(f"    sudo netwatch start          — start the daemon")
+    print(f"    sudo netwatch label <MAC> <name>  — label a device")
+    print()
+
+def cmd_uninstall(args):
+    require_root()
+    print(c(Y, "  Stopping and removing NetWatch service..."))
+    systemctl("stop")
+    systemctl("disable")
+    subprocess.run(["rm", "-f", "/etc/systemd/system/netwatch.service"])
+    subprocess.run(["systemctl", "daemon-reload"])
+    subprocess.run(["rm", "-f", "/usr/local/bin/netwatch"])
+    print(c(G, "  ✓ Service removed. Data at /opt/netwatch is preserved."))
+    print(c(DIM, "  To remove data: sudo rm -rf /opt/netwatch"))
+
+def cmd_help(args=None):
+    print(BANNER)
+    cmds = [
+        ("start",            "",              "Start the NetWatch daemon"),
+        ("stop",             "",              "Stop the daemon"),
+        ("restart",          "",              "Restart the daemon"),
+        ("status",           "",              "Show service status + device table"),
+        ("logs",             "[-f] [-n N]",   "Show logs (-f to follow live)"),
+        ("scan",             "",              "Run a one-shot nmap scan"),
+        ("devices",          "",              "List all known devices"),
+        ("label",            "<MAC> <name>",  "Label and trust a device"),
+        ("trust",            "<MAC>",         "Add MAC to trusted list"),
+        ("untrust",          "<MAC>",         "Remove MAC from trusted list"),
+        ("history",          "[-n N]",        "Show recent scan history"),
+        ("test-telegram",    "",              "Send a Telegram test message"),
+        ("config",           "",              "Show current config"),
+        ("install",          "",              "Install NetWatch (run from source dir)"),
+        ("uninstall",        "",              "Remove service and CLI"),
+    ]
+    print(f"  {c(W,'Usage:')} netwatch <command> [options]\n")
+    print(f"  {c(W,'Commands:')}")
+    for cmd, args_hint, desc in cmds:
+        hint = c(DIM, f" {args_hint}") if args_hint else ""
+        print(f"    {c(C, f'netwatch {cmd}')}{hint}")
+        print(f"      {desc}")
+    print()
+    print(f"  {c(DIM,'Commands marked with (root) need: sudo netwatch <cmd>')}")
+    print()
+
+
+# ── Main ──────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(prog="netwatch", add_help=False)
+    sub    = parser.add_subparsers(dest="command")
+
+    sub.add_parser("start")
+    sub.add_parser("stop")
+    sub.add_parser("restart")
+    sub.add_parser("status")
+
+    p_logs = sub.add_parser("logs")
+    p_logs.add_argument("-f", "--follow", action="store_true")
+    p_logs.add_argument("-n", "--lines", type=int, default=50)
+
+    sub.add_parser("scan")
+    sub.add_parser("devices")
+
+    p_label = sub.add_parser("label")
+    p_label.add_argument("mac")
+    p_label.add_argument("name")
+
+    p_trust = sub.add_parser("trust")
+    p_trust.add_argument("mac")
+
+    p_untrust = sub.add_parser("untrust")
+    p_untrust.add_argument("mac")
+
+    p_hist = sub.add_parser("history")
+    p_hist.add_argument("-n", "--count", type=int, default=10)
+
+    sub.add_parser("test-telegram")
+    sub.add_parser("config")
+    sub.add_parser("install")
+    sub.add_parser("uninstall")
+    sub.add_parser("help")
+
+    args = parser.parse_args()
+
+    dispatch = {
+        "start":          cmd_start,
+        "stop":           cmd_stop,
+        "restart":        cmd_restart,
+        "status":         cmd_status,
+        "logs":           cmd_logs,
+        "scan":           cmd_scan,
+        "devices":        cmd_devices,
+        "label":          cmd_label,
+        "trust":          cmd_trust,
+        "untrust":        cmd_untrust,
+        "history":        cmd_history,
+        "test-telegram":  cmd_test_telegram,
+        "config":         cmd_config,
+        "install":        cmd_install,
+        "uninstall":      cmd_uninstall,
+        "help":           cmd_help,
+    }
+
+    fn = dispatch.get(args.command)
+    if fn:
+        fn(args)
+    else:
+        cmd_help()
+
+if __name__ == "__main__":
+    main()

@@ -29,6 +29,324 @@ DEVICES_FILE   = BASE_DIR / "known_devices.json"
 LOG_FILE       = BASE_DIR / "netwatch.log"
 HISTORY_FILE   = BASE_DIR / "scan_history.json"
 
+# ─────────────────────────────────────────────
+#  Smart OS Detection Engine
+# ─────────────────────────────────────────────
+
+# MAC OUI prefix → (likely OS, confidence note)
+OUI_OS_MAP = {
+    # Apple
+    "00:03:93": ("iOS / macOS",         "Apple device"),
+    "00:0A:27": ("macOS",               "Apple Mac"),
+    "00:0A:95": ("macOS",               "Apple Mac"),
+    "00:11:24": ("iOS / macOS",         "Apple device"),
+    "00:17:F2": ("macOS",               "Apple Mac"),
+    "00:1B:63": ("macOS",               "Apple Mac"),
+    "00:1C:B3": ("iOS / macOS",         "Apple device"),
+    "00:1E:52": ("iOS / macOS",         "Apple device"),
+    "00:1F:5B": ("macOS",               "Apple Mac"),
+    "00:21:E9": ("macOS",               "Apple Mac"),
+    "00:22:41": ("macOS",               "Apple Mac"),
+    "00:23:12": ("macOS",               "Apple Mac"),
+    "00:23:32": ("iOS / macOS",         "Apple device"),
+    "00:23:6C": ("iOS",                 "Apple iPhone/iPad"),
+    "00:24:36": ("macOS",               "Apple Mac"),
+    "00:25:00": ("iOS / macOS",         "Apple device"),
+    "00:25:4B": ("macOS",               "Apple Mac"),
+    "00:26:08": ("macOS",               "Apple Mac"),
+    "00:26:B0": ("iOS / macOS",         "Apple device"),
+    "00:26:BB": ("iOS / macOS",         "Apple device"),
+    "04:15:52": ("iOS / macOS",         "Apple device"),
+    "04:4B:ED": ("iOS",                 "Apple iPhone/iPad"),
+    "04:54:53": ("iOS / macOS",         "Apple device"),
+    "08:70:45": ("iOS / macOS",         "Apple device"),
+    "10:40:F3": ("iOS / macOS",         "Apple device"),
+    "28:37:37": ("iOS / macOS",         "Apple device"),
+    "28:CF:E9": ("iOS / macOS",         "Apple device"),
+    "28:EA:2D": ("iOS",                 "Apple iPhone"),
+    "3C:07:54": ("iOS / macOS",         "Apple device"),
+    "40:6C:8F": ("iOS / macOS",         "Apple device"),
+    "48:43:7C": ("iOS / macOS",         "Apple device"),
+    "60:03:08": ("iOS / macOS",         "Apple device"),
+    "60:33:4B": ("iOS / macOS",         "Apple device"),
+    "6C:40:08": ("iOS / macOS",         "Apple device"),
+    "70:73:CB": ("iOS / macOS",         "Apple device"),
+    "7C:6D:62": ("iOS / macOS",         "Apple device"),
+    "80:E6:50": ("iOS / macOS",         "Apple device"),
+    "98:FE:94": ("iOS / macOS",         "Apple device"),
+    "A4:67:06": ("iOS / macOS",         "Apple device"),
+    "AC:BC:32": ("iOS / macOS",         "Apple device"),
+    "B8:09:8A": ("macOS",               "Apple Mac"),
+    "C8:2A:14": ("iOS / macOS",         "Apple device"),
+    "DC:2B:2A": ("iOS / macOS",         "Apple device"),
+    "E0:AC:CB": ("macOS",               "Apple Mac"),
+    "F4:F1:5A": ("iOS / macOS",         "Apple device"),
+    # Samsung
+    "00:15:99": ("Android",             "Samsung device"),
+    "00:16:32": ("Android",             "Samsung device"),
+    "00:17:C9": ("Android",             "Samsung Galaxy"),
+    "00:21:19": ("Android",             "Samsung device"),
+    "00:23:39": ("Android",             "Samsung device"),
+    "00:26:37": ("Android",             "Samsung device"),
+    "08:08:C2": ("Android",             "Samsung device"),
+    "08:D4:2B": ("Android",             "Samsung Galaxy"),
+    "18:67:B0": ("Android",             "Samsung Galaxy"),
+    "30:CD:A7": ("Android",             "Samsung device"),
+    "34:23:BA": ("Android",             "Samsung device"),
+    "38:16:D1": ("Android",             "Samsung Galaxy"),
+    "50:01:BB": ("Android",             "Samsung device"),
+    "5C:49:79": ("Android",             "Samsung Galaxy"),
+    "6C:2F:2C": ("Android",             "Samsung device"),
+    "84:38:38": ("Android",             "Samsung device"),
+    "8C:71:F8": ("Android",             "Samsung Galaxy"),
+    "A0:07:98": ("Android",             "Samsung device"),
+    "B4:07:F9": ("Android",             "Samsung Galaxy"),
+    "CC:07:AB": ("Android",             "Samsung device"),
+    "E4:92:FB": ("Android",             "Samsung device"),
+    "F8:04:2E": ("Android",             "Samsung Galaxy"),
+    # Google / Pixel
+    "00:1A:11": ("Android",             "Google device"),
+    "3C:5A:B4": ("Android",             "Google Pixel"),
+    "54:60:09": ("Android",             "Google Pixel"),
+    "94:EB:2C": ("Android",             "Google device"),
+    "F4:F5:D8": ("Android",             "Google Pixel"),
+    # OnePlus
+    "04:4E:AF": ("Android",             "OnePlus device"),
+    "8C:47:6E": ("Android",             "OnePlus device"),
+    "94:65:2D": ("Android",             "OnePlus device"),
+    # Xiaomi
+    "00:9E:C8": ("Android",             "Xiaomi device"),
+    "04:CF:8C": ("Android",             "Xiaomi device"),
+    "10:2A:B3": ("Android",             "Xiaomi device"),
+    "18:59:36": ("Android",             "Xiaomi device"),
+    "20:82:C0": ("Android",             "Xiaomi device"),
+    "28:6C:07": ("Android",             "Xiaomi device"),
+    "34:80:B3": ("Android",             "Xiaomi device"),
+    "38:A4:ED": ("Android",             "Xiaomi device"),
+    "4A:B5:D3": ("Android / iOS",       "Xiaomi or randomized MAC"),
+    "50:64:2B": ("Android",             "Xiaomi device"),
+    "58:44:98": ("Android",             "Xiaomi device"),
+    "64:09:80": ("Android",             "Xiaomi device"),
+    "64:B4:73": ("Android",             "Xiaomi device"),
+    "68:DF:DD": ("Android",             "Xiaomi device"),
+    "74:23:44": ("Android",             "Xiaomi device"),
+    "78:11:DC": ("Android",             "Xiaomi device"),
+    "8C:BE:BE": ("Android",             "Xiaomi device"),
+    "9C:99:A0": ("Android",             "Xiaomi device"),
+    "AC:C1:EE": ("Android",             "Xiaomi device"),
+    "B0:E2:35": ("Android",             "Xiaomi device"),
+    "C4:0B:CB": ("Android",             "Xiaomi device"),
+    "D4:97:0B": ("Android",             "Xiaomi device"),
+    "F4:8B:32": ("Android",             "Xiaomi device"),
+    "F8:A4:5F": ("Android",             "Xiaomi device"),
+    # Huawei
+    "00:18:82": ("Android / HarmonyOS", "Huawei device"),
+    "00:E0:FC": ("Android / HarmonyOS", "Huawei device"),
+    "04:BD:88": ("Android / HarmonyOS", "Huawei device"),
+    "18:B4:30": ("Android / HarmonyOS", "Huawei device"),
+    "20:F3:A3": ("Android / HarmonyOS", "Huawei device"),
+    "2C:AB:00": ("Android / HarmonyOS", "Huawei device"),
+    "34:6B:D3": ("Android / HarmonyOS", "Huawei device"),
+    "40:4D:7F": ("Android / HarmonyOS", "Huawei device"),
+    "48:00:31": ("Android / HarmonyOS", "Huawei device"),
+    "54:51:1B": ("Android / HarmonyOS", "Huawei device"),
+    "5C:C3:07": ("Android / HarmonyOS", "Huawei device"),
+    "70:54:D2": ("Android / HarmonyOS", "Huawei device"),
+    "78:1D:BA": ("Android / HarmonyOS", "Huawei device"),
+    "80:D4:A5": ("Android / HarmonyOS", "Huawei device"),
+    "90:67:1C": ("Android / HarmonyOS", "Huawei device"),
+    "B4:CD:27": ("Android / HarmonyOS", "Huawei device"),
+    "C8:14:79": ("Android / HarmonyOS", "Huawei device"),
+    "D4:6A:A8": ("Android / HarmonyOS", "Huawei device"),
+    "E8:CD:2D": ("Android / HarmonyOS", "Huawei device"),
+    "F4:CB:52": ("Android / HarmonyOS", "Huawei device"),
+    # Amazon
+    "00:BB:3A": ("Amazon Fire OS",       "Amazon Echo/Fire"),
+    "10:AE:60": ("Amazon Fire OS",       "Amazon device"),
+    "34:D2:70": ("Amazon Fire OS",       "Amazon Echo"),
+    "40:B4:CD": ("Amazon Fire OS",       "Amazon Echo/Fire"),
+    "44:65:0D": ("Amazon Fire OS",       "Amazon device"),
+    "50:F5:DA": ("Amazon Fire OS",       "Amazon Echo"),
+    "68:37:E9": ("Amazon Fire OS",       "Amazon Echo"),
+    "74:C2:46": ("Amazon Fire OS",       "Amazon device"),
+    "84:D6:D0": ("Amazon Fire OS",       "Amazon Echo"),
+    "A0:02:DC": ("Amazon Fire OS",       "Amazon Echo"),
+    "B4:7C:9C": ("Amazon Fire OS",       "Amazon Echo"),
+    "CC:9E:A2": ("Amazon Fire OS",       "Amazon Fire TV"),
+    "F0:4F:7C": ("Amazon Fire OS",       "Amazon Echo"),
+    "F0:81:73": ("Amazon Fire OS",       "Amazon Echo"),
+    "FC:A6:67": ("Amazon Fire OS",       "Amazon Echo"),
+    # Raspberry Pi
+    "B8:27:EB": ("Linux (Raspberry Pi)", "Raspberry Pi"),
+    "DC:A6:32": ("Linux (Raspberry Pi)", "Raspberry Pi 4"),
+    "E4:5F:01": ("Linux (Raspberry Pi)", "Raspberry Pi"),
+    # Windows / PC
+    "00:50:56": ("Windows / Linux",      "VMware VM"),
+    "08:00:27": ("Linux",                "VirtualBox VM"),
+    "00:15:5D": ("Windows",              "Hyper-V VM"),
+    # Smart TVs
+    "00:17:88": ("Hue Bridge / IoT",     "Philips Hue"),
+    "00:24:BE": ("Android TV",           "Sony TV"),
+    "18:4B:0D": ("Tizen / Android TV",   "Samsung TV"),
+    "20:6E:9C": ("webOS",                "LG TV"),
+    "34:7E:5C": ("Android TV",           "Sony TV"),
+    "40:2C:F4": ("Tizen",                "Samsung TV"),
+    "48:44:F7": ("Android TV",           "Nvidia Shield"),
+    "5C:AA:FD": ("Tizen",                "Samsung TV"),
+    "78:BD:BC": ("webOS",                "LG TV"),
+    "9C:84:BF": ("Android TV",           "Sony TV"),
+    "A0:75:91": ("webOS",                "LG Smart TV"),
+    "BC:30:7E": ("Tizen",                "Samsung Smart TV"),
+    "CC:6D:A0": ("Tizen",                "Samsung TV"),
+    # Routers
+    "8C:13:E2": ("Linux (Router)",       "Netlink ICT Router"),
+}
+
+# Hostname pattern → OS guess
+HOSTNAME_OS_PATTERNS = [
+    (r"iphone",           "iOS",                "Apple iPhone"),
+    (r"ipad",             "iPadOS",             "Apple iPad"),
+    (r"macbook",          "macOS",              "Apple MacBook"),
+    (r"imac",             "macOS",              "Apple iMac"),
+    (r"apple",            "iOS / macOS",        "Apple device"),
+    (r"android",          "Android",            "Android phone/tablet"),
+    (r"galaxy",           "Android",            "Samsung Galaxy"),
+    (r"pixel",            "Android",            "Google Pixel"),
+    (r"oneplus",          "Android",            "OnePlus phone"),
+    (r"xiaomi|miphone",   "Android",            "Xiaomi phone"),
+    (r"huawei",           "Android/HarmonyOS",  "Huawei device"),
+    (r"echo|alexa",       "Amazon Fire OS",     "Amazon Echo"),
+    (r"kindle|fire",      "Amazon Fire OS",     "Amazon Fire tablet"),
+    (r"firetv|fire-tv",   "Amazon Fire OS",     "Amazon Fire TV"),
+    (r"raspberrypi|rpi",  "Linux (Raspberry Pi)","Raspberry Pi"),
+    (r"ubuntu|debian|fedora|arch|centos", "Linux", "Linux PC"),
+    (r"windows|win10|win11", "Windows",         "Windows PC"),
+    (r"xbox",             "Xbox OS",            "Microsoft Xbox"),
+    (r"playstation|ps[45]","PlayStation OS",    "Sony PlayStation"),
+    (r"nintendo|switch",  "Nintendo OS",        "Nintendo Switch"),
+    (r"roku",             "Roku OS",            "Roku device"),
+    (r"chromecast",       "ChromeOS",           "Google Chromecast"),
+    (r"nest|google-home", "Android/IoT",        "Google Home/Nest"),
+    (r"ring",             "Linux (IoT)",        "Ring device"),
+    (r"sonos",            "Linux (IoT)",        "Sonos speaker"),
+    (r"synology",         "Linux (NAS)",        "Synology NAS"),
+    (r"qnap",             "Linux (NAS)",        "QNAP NAS"),
+]
+
+# Vendor string → OS guess
+VENDOR_OS_MAP = {
+    "apple":     ("iOS / macOS",         "Apple device"),
+    "samsung":   ("Android",             "Samsung device"),
+    "xiaomi":    ("Android",             "Xiaomi/MIUI device"),
+    "huawei":    ("Android/HarmonyOS",   "Huawei device"),
+    "google":    ("Android",             "Google device"),
+    "amazon":    ("Amazon Fire OS",      "Amazon device"),
+    "microsoft": ("Windows",             "Microsoft device"),
+    "sony":      ("Android TV / PS OS",  "Sony device"),
+    "lg":        ("webOS / Android",     "LG device"),
+    "raspberry": ("Linux",               "Raspberry Pi"),
+    "netlink":   ("Linux (Router FW)",   "Home Router"),
+    "tp-link":   ("Linux (Router FW)",   "TP-Link device"),
+    "asus":      ("Linux (Router/PC)",   "ASUS device"),
+    "netgear":   ("Linux (Router FW)",   "Netgear device"),
+    "linksys":   ("Linux (Router FW)",   "Linksys device"),
+    "ubiquiti":  ("Linux (Router FW)",   "Ubiquiti device"),
+    "cisco":     ("IOS / Linux",         "Cisco device"),
+    "intel":     ("Windows / Linux",     "Intel NIC — PC"),
+    "realtek":   ("Windows / Linux",     "PC NIC"),
+    "broadcom":  ("Linux / Windows",     "PC or router"),
+}
+
+# Randomized MAC prefixes (locally administered bit set)
+RANDOMIZED_MAC_PREFIXES = {"2", "6", "a", "e"}  # second nibble of first byte
+
+
+def is_randomized_mac(mac: str) -> bool:
+    """Check if MAC is locally administered (randomized privacy MAC)."""
+    if not mac or len(mac) < 2:
+        return False
+    # Second hex digit of first octet: bit 1 set = locally administered
+    try:
+        first_byte = int(mac.replace(":", "")[:2], 16)
+        return bool(first_byte & 0x02)
+    except Exception:
+        return False
+
+
+def guess_os(device: dict) -> dict:
+    """
+    Return enriched OS guess using multiple signals:
+    MAC OUI → hostname patterns → vendor string → nmap result → randomized MAC
+    Returns { os_guess, os_confidence, os_notes }
+    """
+    mac      = (device.get("mac") or "").upper()
+    hostname = (device.get("hostname") or "").lower()
+    vendor   = (device.get("vendor") or "").lower()
+    nmap_os  = (device.get("os_guess") or "").strip()
+    oui      = mac[:8]   # first 3 octets e.g. "28:EA:2D"
+
+    os_guess      = ""
+    os_confidence = "low"
+    os_notes      = []
+
+    # 1. OUI lookup (most reliable for real MACs)
+    if oui in OUI_OS_MAP and not is_randomized_mac(mac):
+        os_guess, note = OUI_OS_MAP[oui]
+        os_confidence = "high"
+        os_notes.append(f"OUI match: {note}")
+
+    # 2. Hostname pattern match
+    for pattern, os_name, note in HOSTNAME_OS_PATTERNS:
+        if re.search(pattern, hostname, re.I):
+            if not os_guess:
+                os_guess = os_name
+                os_confidence = "high"
+            os_notes.append(f"Hostname hint: {note}")
+            break
+
+    # 3. Vendor string match
+    if not os_guess:
+        for keyword, (os_name, note) in VENDOR_OS_MAP.items():
+            if keyword in vendor:
+                os_guess = os_name
+                os_confidence = "medium"
+                os_notes.append(f"Vendor hint: {note}")
+                break
+
+    # 4. nmap OS result (use if we have nothing better, or to confirm)
+    if nmap_os:
+        if not os_guess:
+            os_guess = nmap_os
+            os_confidence = "medium"
+            os_notes.append("nmap OS fingerprint")
+        elif os_guess.lower().split()[0] in nmap_os.lower():
+            os_confidence = "high"
+            os_notes.append(f"Confirmed by nmap: {nmap_os}")
+        else:
+            os_notes.append(f"nmap also suggests: {nmap_os}")
+
+    # 5. Randomized MAC → add as a note
+    if is_randomized_mac(mac):
+        os_notes.append("Randomized/private MAC — real vendor hidden")
+        if not os_guess:
+            os_guess = "Unknown (privacy MAC)"
+            os_confidence = "low"
+        elif os_confidence == "high":
+            os_confidence = "medium"   # downgrade since MAC hides true vendor
+
+    # 6. Fallback
+    if not os_guess:
+        os_guess = "Unknown"
+        os_confidence = "low"
+        os_notes.append("No signals matched")
+
+    return {
+        "os_guess":      os_guess,
+        "os_confidence": os_confidence,
+        "os_notes":      os_notes
+    }
+
+
 DEFAULT_CONFIG = {
     "network_range": "192.168.1.0/24",   # adjust to your subnet
     "scan_interval_seconds": 60,
@@ -196,22 +514,28 @@ def register_device(known: dict, device: dict, trusted_macs: list) -> dict:
     mac = device["mac"] or device["ip"]   # fallback to IP if no MAC
     now = datetime.now().isoformat(timespec="seconds")
 
+    smart = guess_os(device)
     if mac not in known:
         known[mac] = {
             **device,
-            "first_seen": now,
-            "seen_count": 1,
-            "trusted":    mac in [m.upper() for m in trusted_macs],
-            "label":      ""     # user can set a friendly name via known_devices.json
+            "first_seen":    now,
+            "seen_count":    1,
+            "trusted":       mac in [m.upper() for m in trusted_macs],
+            "label":         "",
+            "os_guess":      smart["os_guess"],
+            "os_confidence": smart["os_confidence"],
+            "os_notes":      smart["os_notes"],
         }
     else:
         known[mac].update({
-            "ip":        device["ip"],
-            "hostname":  device["hostname"] or known[mac].get("hostname", ""),
-            "os_guess":  device["os_guess"] or known[mac].get("os_guess", ""),
-            "vendor":    device["vendor"]   or known[mac].get("vendor", ""),
-            "last_seen": now,
-            "seen_count": known[mac].get("seen_count", 0) + 1
+            "ip":            device["ip"],
+            "hostname":      device["hostname"] or known[mac].get("hostname", ""),
+            "os_guess":      smart["os_guess"],
+            "os_confidence": smart["os_confidence"],
+            "os_notes":      smart["os_notes"],
+            "vendor":        device["vendor"] or known[mac].get("vendor", ""),
+            "last_seen":     now,
+            "seen_count":    known[mac].get("seen_count", 0) + 1
         })
     return known[mac]
 
@@ -285,20 +609,32 @@ def fire_alert(cfg: dict, event: str, device: dict, total_online: int):
     os_g  = device.get("os_guess", "?")
 
     if event == "new_device":
+        # Run smart OS detection
+        smart = guess_os(device)
+        os_display    = smart["os_guess"]
+        os_confidence = smart["os_confidence"]
+        os_notes_str  = " • ".join(smart["os_notes"])
+        conf_emoji    = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(os_confidence, "⚪")
+        rand_note     = " ⚠️ Privacy/randomized MAC" if is_randomized_mac(mac) else ""
+
         subject = f"⚠️ NEW DEVICE on network: {label}"
         body = (
             f"A device just joined your network!\n\n"
-            f"{format_device_info(device)}\n\n"
+            f"{format_device_info(device)}\n"
+            f"  OS (smart)  : {os_display} ({os_confidence} confidence)\n"
+            f"  OS signals  : {os_notes_str}\n\n"
             f"Total devices online: {total_online}\n"
             f"Time: {now}"
         )
         tg_msg = (
-            f"🚨 <b>New Device Detected!</b>\n"
+            f"🚨 <b>New Device Detected!</b>{rand_note}\n\n"
             f"<b>Name:</b> {label}\n"
             f"<b>IP:</b> {ip}\n"
             f"<b>MAC:</b> {mac}\n"
-            f"<b>Vendor:</b> {vendor}\n"
-            f"<b>OS:</b> {os_g}\n"
+            f"<b>Vendor:</b> {vendor}\n\n"
+            f"<b>OS Guess:</b> {os_display}\n"
+            f"<b>Confidence:</b> {conf_emoji} {os_confidence}\n"
+            f"<b>Signals:</b> {os_notes_str}\n\n"
             f"<b>Devices online:</b> {total_online}\n"
             f"<b>Time:</b> {now}"
         )
