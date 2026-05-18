@@ -1,0 +1,26 @@
+[Unit]
+Description=TraffWatch – Per-device Traffic Activity Monitor
+Documentation=https://github.com/yourname/netwatch
+After=network-online.target netwatch.service
+Wants=network-online.target
+
+[Service]
+User=root
+Group=root
+
+WorkingDirectory=/opt/netwatch
+ExecStart=/usr/bin/python3 /opt/netwatch/traffic_monitor.py
+
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=traffwatch
+
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

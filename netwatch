@@ -377,39 +377,530 @@ def cmd_uninstall(args):
     print(c(Y, "  Stopping and removing NetWatch service..."))
     systemctl("stop")
     systemctl("disable")
+    subprocess.run(["systemctl", "stop", "traffwatch"], capture_output=True)
+    subprocess.run(["systemctl", "disable", "traffwatch"], capture_output=True)
     subprocess.run(["rm", "-f", "/etc/systemd/system/netwatch.service"])
+    subprocess.run(["rm", "-f", "/etc/systemd/system/traffwatch.service"])
     subprocess.run(["systemctl", "daemon-reload"])
     subprocess.run(["rm", "-f", "/usr/local/bin/netwatch"])
     print(c(G, "  ✓ Service removed. Data at /opt/netwatch is preserved."))
     print(c(DIM, "  To remove data: sudo rm -rf /opt/netwatch"))
 
+
+# ── Traffic commands ───────────────────────────────────────
+
+ACTIVITY_FILE = INSTALL_DIR / "activity_log.json"
+TRAFF_CFG     = INSTALL_DIR / "traffic_config.json"
+TRAFF_SVC     = "traffwatch"
+
+CAT_COLORS = {
+    "Video":     C,
+    "Gaming":    OR,
+    "Social":    P,
+    "Adult":     R,
+    "Gambling":  R,
+    "Education": G,
+    "Music":     B,
+    "Comms":     DIM,
+    "Shopping":  DIM,
+    "Other":     DIM,
+}
+
+def cmd_traffic(args):
+    """Show today's activity for all devices."""
+    check_install()
+    print_banner("traffic")
+    from datetime import date as _date
+    today    = _date.today().isoformat()
+    activity = load_json(ACTIVITY_FILE, {})
+    day_data = activity.get(today, {})
+    devices  = load_json(DEVICES_FILE, {})
+    ip_label = {d.get("ip"): (d.get("label") or d.get("hostname") or mac)
+                for mac, d in devices.items()}
+
+    if not day_data:
+        print(c(Y, "  No activity recorded today yet."))
+        print(c(DIM, "  Make sure traffwatch is running: sudo netwatch traffic-start\n"))
+        return
+
+    print(f"  {c(W, 'Today — ' + today)}\n")
+    for ip, cats in sorted(day_data.items()):
+        label = ip_label.get(ip, ip)
+        print(f"  {c(W, label)}  {c(DIM, ip)}")
+        for cat, services in sorted(cats.items(), key=lambda x: -sum(x[1].values())):
+            hits     = sum(services.values())
+            est_mins = max(1, int(hits / 2))
+            top_svc  = max(services, key=services.get)
+            col      = CAT_COLORS.get(cat, DIM)
+            bar_len  = min(30, est_mins // 2)
+            bar      = "█" * bar_len
+            print(f"    {col}{cat:<10}{RST}  {c(W, top_svc):<24}  ~{est_mins:>3} min  {col}{bar}{RST}")
+        print()
+
+def cmd_traffic_activity(args):
+    """Show activity for a specific device."""
+    check_install()
+    print_banner("traffic")
+    from datetime import date as _date
+    target_mac = args.mac.upper() if hasattr(args, "mac") and args.mac else None
+    days       = getattr(args, "days", 1)
+    activity   = load_json(ACTIVITY_FILE, {})
+    devices    = load_json(DEVICES_FILE, {})
+
+    target_ip  = None
+    label      = target_mac
+    for mac, d in devices.items():
+        if mac == target_mac:
+            target_ip = d.get("ip")
+            label = d.get("label") or d.get("hostname") or mac
+            break
+
+    if not target_ip:
+        print(c(R, f"  ✗ MAC {target_mac} not found. Run 'netwatch devices' to see MACs."))
+        return
+
+    print(f"  Activity for {c(W, label)}  {c(DIM, target_ip)}  (last {days} day(s))\n")
+
+    from datetime import timedelta
+    today = _date.today()
+    for i in range(days - 1, -1, -1):
+        check_date = (today - timedelta(days=i)).isoformat()
+        day_data   = activity.get(check_date, {}).get(target_ip, {})
+        print(f"  {c(W, check_date)}")
+        if not day_data:
+            print(c(DIM, "    No activity\n"))
+            continue
+        for cat, services in sorted(day_data.items(), key=lambda x: -sum(x[1].values())):
+            hits     = sum(services.values())
+            est_mins = max(1, int(hits / 2))
+            col      = CAT_COLORS.get(cat, DIM)
+            print(f"    {col}{cat:<10}{RST}  ~{est_mins} min")
+            for svc, count in sorted(services.items(), key=lambda x: -x[1]):
+                print(f"      {c(DIM, '·')}  {svc:<24}  {c(DIM, str(count) + ' hits')}")
+        print()
+
+def cmd_traffic_limits(args):
+    """Show or set time limits for watched devices."""
+    check_install()
+    print_banner("traffic")
+    tcfg    = load_json(TRAFF_CFG, {})
+    watched = tcfg.get("watched_devices", {})
+    devices = load_json(DEVICES_FILE, {})
+
+    if not watched:
+        print(c(Y, "  No devices being watched yet."))
+        print(c(DIM, "  Add one: sudo netwatch traffic-watch <MAC> <Category> <minutes>"))
+        print(c(DIM, "  Example: sudo netwatch traffic-watch 26:8D:B1:2F:EC:C2 Gaming 60\n"))
+        return
+
+    print(f"  {c(W, 'Watched devices and time limits')}\n")
+    for mac, dcfg in watched.items():
+        d     = devices.get(mac, {})
+        label = dcfg.get("label") or d.get("label") or d.get("hostname") or mac
+        print(f"  {c(W, label)}  {c(DIM, mac)}")
+        for cat, mins in dcfg.get("limits", {}).items():
+            col = CAT_COLORS.get(cat, DIM)
+            print(f"    {col}{cat:<10}{RST}  {mins} min/day")
+        print()
+
+def cmd_traffic_watch(args):
+    """Set a time limit for a device+category."""
+    require_root()
+    check_install()
+    print_banner("traffic")
+    mac      = args.mac.upper()
+    category = args.category.capitalize()
+    minutes  = args.minutes
+    devices  = load_json(DEVICES_FILE, {})
+    tcfg     = load_json(TRAFF_CFG, {})
+
+    if mac not in devices:
+        print(c(R, f"  ✗ MAC {mac} not found. Run 'netwatch devices'."))
+        return
+
+    label = devices[mac].get("label") or devices[mac].get("hostname") or mac
+    watched = tcfg.setdefault("watched_devices", {})
+    watched.setdefault(mac, {"label": label, "limits": {}})
+    watched[mac]["label"] = label
+    watched[mac]["limits"][category] = int(minutes)
+    save_json(TRAFF_CFG, tcfg)
+    print(c(G, f"  ✓ {label}  →  {category}  limit set to {minutes} min/day"))
+    print(c(DIM, "  Restart traffwatch to apply: sudo netwatch traffic-restart\n"))
+
+def cmd_traffic_unwatch(args):
+    """Remove a time limit for a device+category."""
+    require_root()
+    check_install()
+    mac      = args.mac.upper()
+    category = args.category.capitalize() if hasattr(args, "category") and args.category else None
+    tcfg     = load_json(TRAFF_CFG, {})
+    watched  = tcfg.get("watched_devices", {})
+
+    if mac not in watched:
+        print(c(Y, f"  {mac} is not being watched."))
+        return
+
+    if category:
+        watched[mac]["limits"].pop(category, None)
+        print(c(Y, f"  ✓ Removed {category} limit for {mac}"))
+    else:
+        watched.pop(mac, None)
+        print(c(Y, f"  ✓ Removed all limits for {mac}"))
+
+    save_json(TRAFF_CFG, tcfg)
+
+def cmd_traffic_live(args):
+    """
+    Live updating dashboard — shows what each device is doing RIGHT NOW.
+    Tails the traffwatch journal and renders a live per-device activity board.
+    Refreshes every 3 seconds. Press Ctrl+C to exit.
+    """
+    import time
+    import re
+    import shutil
+    from collections import defaultdict, deque
+    from datetime import datetime
+
+    check_install()
+
+    # ANSI helpers
+    CLEAR    = "\033[2J\033[H"
+    HIDE_CUR = "\033[?25l"
+    SHOW_CUR = "\033[?25h"
+    UP       = lambda n: f"\033[{n}A"
+    BOLD_W   = "\033[1;37m"
+
+    CAT_ICON = {
+        "Video":     "▶",
+        "Gaming":    "🎮" if shutil.get_terminal_size().columns > 40 else "G",
+        "Social":    "◈",
+        "Adult":     "⚠",
+        "Gambling":  "⚠",
+        "Education": "✦",
+        "Music":     "♪",
+        "Comms":     "☎",
+        "Shopping":  "◉",
+        "Other":     "·",
+    }
+    CAT_COL = {
+        "Video":     C,
+        "Gaming":    OR,
+        "Social":    P,
+        "Adult":     R,
+        "Gambling":  R,
+        "Education": G,
+        "Music":     B,
+        "Comms":     DIM,
+        "Shopping":  DIM,
+        "Other":     DIM,
+    }
+
+    # Recent activity window per device: (ip) -> deque of (timestamp, category, service)
+    recent: dict = defaultdict(lambda: deque(maxlen=12))
+    # Last seen service per device for the "NOW" indicator
+    last_seen: dict = {}   # ip -> (category, service, timestamp)
+
+    devices  = load_json(DEVICES_FILE, {})
+    ip_label = {d.get("ip"): (d.get("label") or d.get("hostname") or mac)
+                for mac, d in devices.items()}
+
+    def get_label(ip):
+        return ip_label.get(ip, ip)
+
+    def time_ago(ts: float) -> str:
+        diff = time.time() - ts
+        if diff < 5:   return f"{G}just now{RST}"
+        if diff < 60:  return f"{c(DIM, str(int(diff)) + 's ago')}"
+        if diff < 3600:return f"{c(DIM, str(int(diff//60)) + 'm ago')}"
+        return f"{c(DIM, str(int(diff//3600)) + 'h ago')}"
+
+    def bar(mins: int, limit: int = 0, width: int = 20) -> str:
+        if limit:
+            pct  = min(1.0, mins / limit)
+            fill = int(pct * width)
+            col  = G if pct < 0.6 else (Y if pct < 0.9 else R)
+            return f"{col}{'█' * fill}{'░' * (width - fill)}{RST} {mins}/{limit}m"
+        fill = min(width, mins // 3)
+        return f"{C}{'█' * fill}{RST}"
+
+    def render(recent, last_seen, tcfg):
+        lines = []
+        now_str = datetime.now().strftime("%H:%M:%S")
+        w = shutil.get_terminal_size().columns
+
+        lines.append(f"\n{C}╭{'─' * (w-2)}╮{RST}")
+        title = f"  ◉  N E T W A T C H  ·  live traffic   {DIM}{now_str}{RST}"
+        lines.append(f"{C}│{RST}{title:<{w-2}}{C}│{RST}")
+        lines.append(f"{C}╰{'─' * (w-2)}╯{RST}")
+        lines.append(f"  {DIM}Ctrl+C to exit   •   updates every 3s{RST}\n")
+
+        watched_devs = tcfg.get("watched_devices", {})
+        # MAC → ip map for limit lookup
+        mac_for_ip = {d.get("ip"): mac for mac, d in devices.items()}
+
+        if not last_seen:
+            lines.append(f"  {DIM}Waiting for traffic...{RST}")
+            lines.append(f"  {DIM}Make sure devices are actively using the internet.{RST}\n")
+        else:
+            for ip, (cat, svc, ts) in sorted(last_seen.items(),
+                                              key=lambda x: -x[1][2]):
+                label   = get_label(ip)
+                col     = CAT_COL.get(cat, DIM)
+                icon    = CAT_ICON.get(cat, "·")
+                ago_str = time_ago(ts)
+                active  = time.time() - ts < 90   # active in last 90s
+
+                status  = f"{G}● LIVE{RST}" if time.time() - ts < 10 else f"{Y}○ {ago_str}{RST}"
+
+                lines.append(f"  {BOLD_W}{label:<22}{RST}  {status}")
+                lines.append(f"    {col}{icon}  {cat:<10}  {W}{svc}{RST}")
+
+                # Show recent activity trail for this device
+                trail = list(recent[ip])[-6:]
+                if trail:
+                    trail_str = "  ".join(
+                        f"{CAT_COL.get(c2,DIM)}{s2}{RST}"
+                        for _, c2, s2 in reversed(trail)
+                    )
+                    lines.append(f"    {DIM}recent:{RST}  {trail_str}")
+
+                # Show time limits if this is a watched device
+                mac = mac_for_ip.get(ip)
+                if mac and mac in watched_devs:
+                    activity = load_json(ACTIVITY_FILE, {})
+                    from datetime import date as _date
+                    today = _date.today().isoformat()
+                    limits = watched_devs[mac].get("limits", {})
+                    if limits:
+                        parts = []
+                        for lcat, lmins in limits.items():
+                            cats = activity.get(today, {}).get(ip, {}).get(lcat, {})
+                            used = max(1, int(sum(cats.values()) / 2))
+                            parts.append(
+                                f"{CAT_COL.get(lcat,DIM)}{lcat}{RST}: "
+                                f"{bar(used, lmins, 12)}"
+                            )
+                        lines.append(f"    {DIM}limits:{RST}  {'   '.join(parts)}")
+
+                lines.append("")
+
+        return "\n".join(lines)
+
+    # Start tailing traffwatch journal for live events
+    tail_cmd = ["journalctl", "-u", "traffwatch", "-f", "-n", "0",
+                "--no-pager", "--output=short-unix"]
+
+    print(HIDE_CUR, end="", flush=True)
+    try:
+        proc = subprocess.Popen(
+            tail_cmd, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1
+        )
+
+        tcfg = load_json(TRAFF_CFG, {})
+        last_render = 0.0
+
+        # Parse journal lines in a background thread
+        import threading
+        _lock = threading.Lock()
+
+        def parse_journal():
+            # Pattern from traffwatch log lines
+            # "NEW device" and "ALERT" lines won't appear here —
+            # we parse the INFO lines that traffic_monitor logs
+            # We tail the raw log file instead for richer data
+            pass
+
+        # Actually tail the raw log file for parsed events
+        log_path = INSTALL_DIR / "traffwatch.log"
+
+        def tail_logfile():
+            """Tail the traffwatch.log file for domain hit events."""
+            try:
+                # Seek to end first
+                with open(log_path, "r") as f:
+                    f.seek(0, 2)
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.1)
+                            continue
+                        # Parse lines like:
+                        # 2026-05-15 20:01:23,123 [INFO] 192.168.1.39 → YouTube (Video) youtube.com
+                        # We look for our custom log format from traffic_monitor
+                        m = re.search(
+                            r"(\d+\.\d+\.\d+\.\d+)\s+→\s+(.+?)\s+\((.+?)\)\s+(\S+)",
+                            line
+                        )
+                        if m:
+                            ip, svc, cat, domain = m.groups()
+                            ts = time.time()
+                            with _lock:
+                                recent[ip].append((ts, cat, svc))
+                                last_seen[ip] = (cat, svc, ts)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+        # Also parse DNS/SNI from journal directly as fallback
+        def parse_journal_lines():
+            for raw in proc.stdout:
+                # traffwatch logs: "WARNING: FLAG: Kid's iPad → PornHub (Adult)"
+                # and INFO hits we add below
+                m = re.search(
+                    r"(\d+\.\d+\.\d+\.\d+)\s+→\s+(.+?)\s+\((.+?)\)", raw
+                )
+                if m:
+                    ip, svc, cat = m.groups()
+                    ts = time.time()
+                    with _lock:
+                        recent[ip].append((ts, cat, svc))
+                        last_seen[ip] = (cat, svc, ts)
+
+        t1 = threading.Thread(target=tail_logfile,       daemon=True)
+        t2 = threading.Thread(target=parse_journal_lines, daemon=True)
+        t1.start()
+        t2.start()
+
+        # Render loop
+        first = True
+        while True:
+            now = time.time()
+            if now - last_render >= 3:
+                tcfg = load_json(TRAFF_CFG, {})
+                with _lock:
+                    output = render(dict(recent), dict(last_seen), tcfg)
+                if first:
+                    print(CLEAR, end="")
+                    first = False
+                else:
+                    # Count lines to move cursor up
+                    line_count = output.count("\n") + 1
+                    print(f"\033[{line_count}A\033[J", end="")
+                print(output, end="", flush=True)
+                last_render = now
+            time.sleep(0.2)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(SHOW_CUR)
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        print(f"\n{c(DIM, '  TraffWatch live view closed.')}\n")
+
+
+def cmd_traffic_start(args):
+    require_root()
+    check_install()
+    subprocess.run(["systemctl", "start", TRAFF_SVC])
+    print(c(G, "  ✓ TraffWatch started."))
+    subprocess.run(["systemctl", "status", TRAFF_SVC, "--no-pager", "-l"])
+
+def cmd_traffic_stop(args):
+    require_root()
+    subprocess.run(["systemctl", "stop", TRAFF_SVC])
+    print(c(Y, "  ◼ TraffWatch stopped."))
+
+def cmd_traffic_restart(args):
+    require_root()
+    check_install()
+    subprocess.run(["systemctl", "restart", TRAFF_SVC])
+    print(c(G, "  ↺ TraffWatch restarted."))
+
+def cmd_traffic_logs(args):
+    check_install()
+    print_banner("traffic")
+    n = getattr(args, "lines", 50)
+    follow = getattr(args, "follow", False)
+    if follow:
+        os.execlp("journalctl", "journalctl", "-u", TRAFF_SVC, "-f", "--no-pager")
+    else:
+        subprocess.run(["journalctl", "-u", TRAFF_SVC, "-n", str(n), "--no-pager"])
+
+def cmd_traffic_install(args):
+    """Install traffwatch service + tshark."""
+    require_root()
+    import shutil
+    src = Path(__file__).parent
+
+    print(c(B, "[1/3]"), "Checking tshark...")
+    if not shutil.which("tshark"):
+        print("  Installing wireshark-cli...")
+        subprocess.run(["pacman", "-S", "--noconfirm", "wireshark-cli"])
+    else:
+        print(f"  tshark: {c(G,'✓')}")
+
+    print(c(B, "[2/3]"), "Copying traffic_monitor.py ...")
+    src_f = src / "traffic_monitor.py"
+    if src_f.exists():
+        shutil.copy2(src_f, INSTALL_DIR / "traffic_monitor.py")
+        print(f"  {c(G,'✓')} Copied to {INSTALL_DIR}/traffic_monitor.py")
+    else:
+        print(c(R, "  ✗ traffic_monitor.py not found in source dir."))
+        return
+
+    print(c(B, "[3/3]"), "Installing systemd service...")
+    svc_src = src / "traffwatch.service"
+    if svc_src.exists():
+        shutil.copy2(svc_src, "/etc/systemd/system/traffwatch.service")
+        subprocess.run(["systemctl", "daemon-reload"])
+        subprocess.run(["systemctl", "enable", TRAFF_SVC])
+        print(f"  {c(G,'✓')} Service enabled.")
+
+    print(f"\n  {c(G,'✓ TraffWatch installed!')}\n")
+    print(f"  {Y}Next steps:{RST}")
+    print(f"    sudo netwatch traffic-start")
+    print(f"    sudo netwatch traffic-watch <MAC> Gaming 60")
+    print(f"    sudo netwatch traffic-watch <MAC> Video 90")
+    print(f"    netwatch traffic              — view today's activity")
+    print()
+
+
 def cmd_help(args=None):
     print_banner("help")
     cmds = [
-        ("start",            "",              "Start the NetWatch daemon"),
-        ("stop",             "",              "Stop the daemon"),
-        ("restart",          "",              "Restart the daemon"),
-        ("status",           "",              "Show service status + device table"),
-        ("logs",             "[-f] [-n N]",   "Show logs (-f to follow live)"),
-        ("scan",             "",              "Run a one-shot nmap scan"),
-        ("devices",          "",              "List all known devices"),
-        ("label",            "<MAC> <name>",  "Label and trust a device"),
-        ("trust",            "<MAC>",         "Add MAC to trusted list"),
-        ("untrust",          "<MAC>",         "Remove MAC from trusted list"),
-        ("history",          "[-n N]",        "Show recent scan history"),
-        ("test-telegram",    "",              "Send a Telegram test message"),
-        ("config",           "",              "Show current config"),
-        ("install",          "",              "Install NetWatch (run from source dir)"),
-        ("uninstall",        "",              "Remove service and CLI"),
+        ("start",                "",                    "Start the NetWatch daemon"),
+        ("stop",                 "",                    "Stop the daemon"),
+        ("restart",              "",                    "Restart the daemon"),
+        ("status",               "",                    "Service status + device table"),
+        ("logs",                 "[-f] [-n N]",         "Show logs (-f to follow live)"),
+        ("scan",                 "",                    "Run a one-shot nmap scan"),
+        ("devices",              "",                    "List all known devices"),
+        ("label",                "<MAC> <name>",        "Label and trust a device"),
+        ("trust",                "<MAC>",               "Add MAC to trusted list"),
+        ("untrust",              "<MAC>",               "Remove from trusted list"),
+        ("history",              "[-n N]",              "Show recent scan history"),
+        ("test-telegram",        "",                    "Send a Telegram test message"),
+        ("config",               "",                    "Show current config"),
+        ("─── Traffic ───",      "",                    ""),
+        ("traffic-install",      "",                    "Install TraffWatch + tshark"),
+        ("traffic-start",        "",                    "Start traffic monitor"),
+        ("traffic-stop",         "",                    "Stop traffic monitor"),
+        ("traffic-restart",      "",                    "Restart traffic monitor"),
+        ("traffic",              "",                    "Show today's activity for all devices"),
+        ("traffic-live",         "",                    "Live dashboard — see what each device is doing NOW"),
+        ("traffic-activity",     "<MAC> [-d days]",     "Show activity for one device"),
+        ("traffic-limits",       "",                    "Show all time limits"),
+        ("traffic-watch",        "<MAC> <Cat> <mins>",  "Set a time limit (e.g. Gaming 60)"),
+        ("traffic-unwatch",      "<MAC> [Cat]",         "Remove a time limit"),
+        ("traffic-logs",         "[-f] [-n N]",         "TraffWatch logs"),
+        ("─── Setup ───",        "",                    ""),
+        ("install",              "",                    "Install NetWatch from source dir"),
+        ("uninstall",            "",                    "Remove service and CLI"),
     ]
     print(f"  {c(W,'Usage:')} netwatch <command> [options]\n")
-    print(f"  {c(W,'Commands:')}")
     for cmd, args_hint, desc in cmds:
+        if cmd.startswith("─"):
+            print(f"\n  {c(DIM, cmd)}")
+            continue
         hint = c(DIM, f" {args_hint}") if args_hint else ""
         print(f"    {c(C, f'netwatch {cmd}')}{hint}")
-        print(f"      {desc}")
-    print()
-    print(f"  {c(DIM,'Commands marked with (root) need: sudo netwatch <cmd>')}")
+        if desc:
+            print(f"      {desc}")
     print()
 
 
@@ -449,25 +940,63 @@ def main():
     sub.add_parser("uninstall")
     sub.add_parser("help")
 
+    # Traffic subcommands
+    sub.add_parser("traffic-install")
+    sub.add_parser("traffic-start")
+    sub.add_parser("traffic-stop")
+    sub.add_parser("traffic-restart")
+    sub.add_parser("traffic")
+    sub.add_parser("traffic-live")
+
+    p_ta = sub.add_parser("traffic-activity")
+    p_ta.add_argument("mac")
+    p_ta.add_argument("-d", "--days", type=int, default=1)
+
+    sub.add_parser("traffic-limits")
+
+    p_tw = sub.add_parser("traffic-watch")
+    p_tw.add_argument("mac")
+    p_tw.add_argument("category")
+    p_tw.add_argument("minutes", type=int)
+
+    p_tuw = sub.add_parser("traffic-unwatch")
+    p_tuw.add_argument("mac")
+    p_tuw.add_argument("category", nargs="?", default=None)
+
+    p_tlogs = sub.add_parser("traffic-logs")
+    p_tlogs.add_argument("-f", "--follow", action="store_true")
+    p_tlogs.add_argument("-n", "--lines", type=int, default=50)
+
     args = parser.parse_args()
 
     dispatch = {
-        "start":          cmd_start,
-        "stop":           cmd_stop,
-        "restart":        cmd_restart,
-        "status":         cmd_status,
-        "logs":           cmd_logs,
-        "scan":           cmd_scan,
-        "devices":        cmd_devices,
-        "label":          cmd_label,
-        "trust":          cmd_trust,
-        "untrust":        cmd_untrust,
-        "history":        cmd_history,
-        "test-telegram":  cmd_test_telegram,
-        "config":         cmd_config,
-        "install":        cmd_install,
-        "uninstall":      cmd_uninstall,
-        "help":           cmd_help,
+        "start":              cmd_start,
+        "stop":               cmd_stop,
+        "restart":            cmd_restart,
+        "status":             cmd_status,
+        "logs":               cmd_logs,
+        "scan":               cmd_scan,
+        "devices":            cmd_devices,
+        "label":              cmd_label,
+        "trust":              cmd_trust,
+        "untrust":            cmd_untrust,
+        "history":            cmd_history,
+        "test-telegram":      cmd_test_telegram,
+        "config":             cmd_config,
+        "install":            cmd_install,
+        "uninstall":          cmd_uninstall,
+        "help":               cmd_help,
+        "traffic-install":    cmd_traffic_install,
+        "traffic-start":      cmd_traffic_start,
+        "traffic-stop":       cmd_traffic_stop,
+        "traffic-restart":    cmd_traffic_restart,
+        "traffic":            cmd_traffic,
+        "traffic-live":       cmd_traffic_live,
+        "traffic-activity":   cmd_traffic_activity,
+        "traffic-limits":     cmd_traffic_limits,
+        "traffic-watch":      cmd_traffic_watch,
+        "traffic-unwatch":    cmd_traffic_unwatch,
+        "traffic-logs":       cmd_traffic_logs,
     }
 
     fn = dispatch.get(args.command)
@@ -478,3 +1007,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
