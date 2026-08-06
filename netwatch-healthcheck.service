@@ -1,0 +1,7 @@
+[Unit]
+Description=NetWatch traffic-capture healthcheck
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/netwatch/netwatch_healthcheck.sh

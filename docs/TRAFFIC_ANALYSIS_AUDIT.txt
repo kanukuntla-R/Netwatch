@@ -1,0 +1,223 @@
+NETWATCH — TRAFFIC ANALYSIS AUDIT
+Generated: 2026-08-01
+Host: "Speed" (Arch Linux, /opt/netwatch)
+
+================================================================
+1. SUMMARY
+================================================================
+
+Traffic analysis has been completely dark for 11+ days
+(last real capture: 2026-07-20 19:59:45). It is NOT a bug in
+traffic_monitor.py or the netwatch CLI. Both services report
+"active (running)" the whole time and log zero errors — the
+failure is silent by design.
+
+ROOT CAUSE:
+  dnsmasq.service fails to start at boot ("unknown interface
+  eno1") because it starts before the eno1 link is ready.
+  dns-intercept.service has `Requires=dnsmasq.service`, so it
+  gets skipped with "Dependency failed" on every boot since.
+  Without dns-intercept (arpspoof + nftables), other devices'
+  traffic never reaches this box, so tshark has nothing to
+  sniff — traffwatch.service runs "successfully" doing nothing.
+
+================================================================
+2. HOW THE PIPELINE IS SUPPOSED TO WORK
+================================================================
+
+NetWatch has three independent moving parts that all have to
+be up simultaneously for traffic analysis to produce data:
+
+  a) network_monitor.py (netwatch.service)
+     nmap ARP scan of 192.168.1.0/24 → known_devices.json
+     STATUS: working fine. Scanning every ~60s, 3 devices seen,
+     last_seen timestamps current as of today.
+
+  b) dns_intercept.sh (dns-intercept.service)
+     - arpspoof -i eno1 192.168.1.1 (spoofs the WHOLE LAN,
+       not a single target) so every device's traffic routes
+       through this box instead of the real router.
+     - nftables DNAT: redirects port 53 (DNS) to 192.168.1.8:53
+     - ip_forward=1 + masquerade to relay traffic back out to
+       the real router transparently.
+     - Depends on dnsmasq.service to actually answer the
+       redirected DNS queries (that's why dnsmasq is a hard
+       dependency — without it, DNS breaks for the whole LAN,
+       not just monitoring).
+     STATUS: BROKEN. Not running. arpspoof process: not found.
+     nftables netwatch_nat table: not applied this boot.
+
+  c) traffic_monitor.py (traffwatch.service)
+     tshark sniffs DNS queries (port 53) and TLS SNI (port 443)
+     on eno1, matches domains against SERVICE_DB, logs hits to
+     traffwatch.log, and drives Telegram alerts/limits.
+     STATUS: "running" but blind — with (b) dead, no other
+     device's unicast traffic ever crosses eno1 for tshark to
+     see (normal switched-LAN behavior; no port mirroring).
+
+The netwatch CLI's `traffic-live` dashboard just tails
+traffwatch.log — it is a passive viewer. Nothing wrong with it
+will produce data if nothing ever gets written upstream.
+
+================================================================
+3. EVIDENCE (from live system, read-only checks)
+================================================================
+
+- traffwatch.log: last domain-hit line is 2026-07-20 19:59:45.
+  Every restart since (23:21 Jul 20, 12:01/12:07/12:13 Jul 28)
+  logs only "TraffWatch starting / Using interface: eno1 /
+  Starting DNS sniffer / Starting SNI sniffer" — then silence.
+
+- `pgrep arpspoof` → empty (not running).
+
+- `systemctl status dns-intercept`:
+    Active: inactive (dead)
+    "Dependency failed for NetWatch DNS Interception
+     (arpspoof + nftables)."  — repeated on every boot since
+     2026-07-20 23:19 (5 boots in a row).
+
+- `systemctl status dnsmasq`:
+    Active: failed (Result: start-limit-hit)
+    journal: "dnsmasq: unknown interface eno1" / "FAILED to
+    start up", 5x rapid restart attempts, then start-limit-hit
+    (systemd gives up permanently until manually reset).
+
+- `dnsmasq.service` unit only has `After=network.target`
+  (not network-online.target), so on boot it can start before
+  udev has the eno1 link fully up — a classic ordering race.
+  /etc/dnsmasq.conf hardcodes `interface=eno1` +
+  `bind-interfaces`, so if the interface isn't there yet,
+  dnsmasq exits immediately with status 2.
+
+- `systemd-networkd-wait-online.service` is ALSO failing every
+  boot ("Timeout occurred while waiting for network
+  connectivity"), even though systemd-networkd itself is active
+  and eno1 shows "Online state: online". This means
+  network-online.target itself is unreliable on this host
+  (most likely because wlan0 is down/no-carrier and/or a
+  docker/veth interface is being waited on too, keeping the
+  target from being reached inside the 2-minute timeout).
+
+- `dns-intercept.service` has `Restart=on-failure` /
+  `RestartSec=30`, but that only applies to the service's OWN
+  failures — a "Dependency failed" job never gets that retry,
+  so once dnsmasq loses its start-limit race at boot, nothing
+  ever attempts dns-intercept again until someone intervenes
+  by hand.
+
+- Reboot history (`last reboot`) shows the box has rebooted
+  5 times since 2026-07-20 23:18 (crashes/power events), and
+  every single one hit this same race — so the failure is
+  fully reproducible, not a one-off fluke.
+
+================================================================
+4. SECONDARY / CONTRIBUTING ISSUES
+================================================================
+
+1. No health check anywhere verifies the MITM path is actually
+   up. traffwatch.service, dns-intercept.service, and the
+   netwatch CLI all report success independent of whether any
+   third-party traffic is actually flowing. A Telegram bot is
+   already configured and working (config.json) but nothing
+   uses it to alert "traffic capture has been dead for N
+   minutes."
+
+2. traffic_monitor.py only logs a line when a domain MATCHES
+   SERVICE_DB (`if category == "Other": return`). There's no
+   periodic heartbeat, so "0 devices matched in the last hour"
+   is indistinguishable in the log from "sniffer never saw a
+   single packet." Makes exactly this kind of outage hard to
+   spot without live traffic to test against.
+
+3. Hard dependency chain is brittle: dnsmasq fail → dns-intercept
+   skipped entirely (not retried) → traffic capture silently
+   dead, with three different services each individually
+   reporting "healthy."
+
+4. eno1 and 192.168.1.8 are hardcoded in dns_intercept.sh,
+   dns_unintercept.sh, and fix-new-router.sh. traffic_monitor.py
+   at least auto-detects the interface; the interception scripts
+   don't, so any interface rename or hub IP change silently
+   breaks interception without an obvious error pointing at the
+   real cause.
+
+5. fix-new-router.sh (untracked in this repo) duplicates what
+   dns_intercept.sh already does (arpspoof + nftables) as a
+   manual one-off script, plus device-registry merging. Useful
+   as a recovery tool but it's really patching around the same
+   underlying boot-ordering bug rather than fixing it — running
+   it again today would restore traffic capture temporarily but
+   the exact same outage will recur on the next reboot.
+
+6. Uncommitted changes in `netwatch` (git diff) are dashboard
+   rendering fixes for `traffic-live` (ANSI-aware padding,
+   thread-safe error surfacing, periodic device-label refresh).
+   These are reasonable and worth keeping, but they don't touch
+   the actual capture path — they will not fix "no data," only
+   how the dashboard displays whatever data does arrive.
+
+================================================================
+5. PROPOSAL — HOW TO GET IT WORKING AGAIN
+================================================================
+
+STEP 0 — immediate unblock (gets you capturing again today,
+does not survive next reboot):
+    sudo systemctl reset-failed dnsmasq
+    sudo systemctl start dnsmasq
+    sudo systemctl start dns-intercept
+    sudo netwatch traffic-restart
+    sudo netwatch traffic-live      # confirm hits start appearing
+
+STEP 1 — fix the actual boot race (root cause):
+  Give dnsmasq a drop-in that waits for the real network
+  target instead of the generic (too-early) network.target:
+    sudo systemctl edit dnsmasq
+  add:
+    [Unit]
+    After=network-online.target
+    Wants=network-online.target
+
+STEP 2 — fix network-online.target itself, since it's timing
+out independently of dnsmasq:
+    networkctl status wlan0 docker0
+  If wlan0/docker0/veth interfaces are expected to stay down,
+  mark them non-required for "online" so wait-online doesn't
+  wait 2 minutes and then give up:
+    # /etc/systemd/network/25-wlan0.network (or wherever wlan0
+    # is configured)
+    [Link]
+    RequiredForOnline=no
+  Re-test with: systemctl restart systemd-networkd-wait-online
+  then: systemctl is-active systemd-networkd-wait-online
+
+STEP 3 — make the dependency chain self-healing instead of
+"fail once, stay dead forever":
+  dns-intercept.service's Requires=dnsmasq.service is correct
+  (dnsmasq really is load-bearing — it's what answers the
+  DNAT'd DNS queries), but a "Dependency failed" job never
+  retries. Add a systemd timer (or reuse the netwatch scan
+  loop) that checks every few minutes:
+    - is arpspoof running?
+    - does nft table ip netwatch_nat exist?
+    - is dnsmasq active?
+  and runs `systemctl restart dns-intercept` (which reset-fails
+  and restarts dnsmasq's dependency chain) if any check fails —
+  with a Telegram alert on the transition to broken/fixed, using
+  the bot credentials already sitting in config.json.
+
+STEP 4 (optional but recommended) — observability so this
+doesn't take 11 days to notice again:
+  Add a one-line heartbeat to traffic_monitor.py's main loop
+  ("N domain hits in the last 5 min") so an all-quiet log is
+  visibly different from a healthy-but-idle one, and wire the
+  health check from Step 3 to the existing Telegram integration.
+
+STEP 5 — commit or discard the in-progress `netwatch` dashboard
+diff (`git diff netwatch`) — it's a legitimate, unrelated
+improvement to `traffic-live` rendering; decide separately from
+this outage whether to keep it.
+
+None of the above steps were applied — this is a report only,
+per your request. Say the word and I can run Step 0 (temporary
+fix) and/or implement Steps 1–4 (persistent fix + self-healing
+watchdog).

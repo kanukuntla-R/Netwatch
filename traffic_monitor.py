@@ -419,6 +419,7 @@ class TraffWatch:
         self._last_alert: dict = {}   # (ip, category) → timestamp of last alert
         self._last_save = time.time()
         self._last_summary_date = None
+        self._hit_count = 0           # domain observations since last heartbeat
 
         iface = self.tcfg.get("interface", "auto")
         self.interface = detect_interface() if iface == "auto" else iface
@@ -491,6 +492,9 @@ class TraffWatch:
 
     # ── Domain handler ────────────────────────
     def _handle_domain(self, src_ip: str, domain: str):
+        with self._lock:
+            self._hit_count += 1
+
         category, service, flag = match_domain(domain)
 
         if category == "Other":
@@ -580,6 +584,17 @@ class TraffWatch:
                 if tg.get("enabled") and tg.get("bot_token"):
                     send_telegram(tg["bot_token"], tg["chat_id"], msg)
 
+    # ── Heartbeat ─────────────────────────────
+    def _heartbeat_loop(self):
+        """Log a periodic line so a quiet-but-alive sniffer looks different
+        in the log from a sniffer that has stopped seeing any packets."""
+        while self.running:
+            time.sleep(300)
+            with self._lock:
+                n = self._hit_count
+                self._hit_count = 0
+            log.info("[HEARTBEAT] %d domain hits in last 5 min", n)
+
     # ── Daily summary ────────────────────────
     def _summary_loop(self):
         """Send a daily activity summary at the configured hour."""
@@ -636,6 +651,7 @@ class TraffWatch:
             threading.Thread(target=self._run_dns_sniffer, daemon=True),
             threading.Thread(target=self._run_sni_sniffer, daemon=True),
             threading.Thread(target=self._summary_loop,    daemon=True),
+            threading.Thread(target=self._heartbeat_loop,  daemon=True),
         ]
         for t in threads:
             t.start()
