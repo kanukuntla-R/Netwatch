@@ -558,16 +558,25 @@ def cmd_traffic_live(args):
     import time
     import re
     import shutil
+    import threading
     from collections import defaultdict, deque
     from datetime import datetime
 
     check_install()
 
+    # Strip ANSI codes to get the visible display length of a string
+    _ANSI_RE = re.compile(r'\033\[[^m]*m')
+    def visible_len(s: str) -> int:
+        return len(_ANSI_RE.sub('', s))
+
+    def ansi_ljust(s: str, width: int) -> str:
+        pad = max(0, width - visible_len(s))
+        return s + ' ' * pad
+
     # ANSI helpers
     CLEAR    = "\033[2J\033[H"
     HIDE_CUR = "\033[?25l"
     SHOW_CUR = "\033[?25h"
-    UP       = lambda n: f"\033[{n}A"
     BOLD_W   = "\033[1;37m"
 
     CAT_ICON = {
@@ -600,18 +609,31 @@ def cmd_traffic_live(args):
     # Last seen service per device for the "NOW" indicator
     last_seen: dict = {}   # ip -> (category, service, timestamp)
 
-    devices  = load_json(DEVICES_FILE, {})
-    ip_label = {d.get("ip"): (d.get("label") or d.get("hostname") or mac)
-                for mac, d in devices.items()}
+    # ip_label is refreshed every render so label changes in known_devices.json
+    # are picked up without restarting the dashboard
+    _label_cache: dict = {}
+    _label_cache_time: list = [0.0]
 
-    def get_label(ip):
-        return ip_label.get(ip, ip)
+    def get_label(ip: str) -> str:
+        now = time.time()
+        if now - _label_cache_time[0] > 10:
+            devs = load_json(DEVICES_FILE, {})
+            _label_cache.clear()
+            for mac, d in devs.items():
+                ip_d = d.get("ip")
+                if ip_d:
+                    _label_cache[ip_d] = d.get("label") or d.get("hostname") or mac
+            _label_cache_time[0] = now
+        return _label_cache.get(ip, ip)
+
+    def _fresh_devices() -> dict:
+        return load_json(DEVICES_FILE, {})
 
     def time_ago(ts: float) -> str:
         diff = time.time() - ts
-        if diff < 5:   return f"{G}just now{RST}"
-        if diff < 60:  return f"{c(DIM, str(int(diff)) + 's ago')}"
-        if diff < 3600:return f"{c(DIM, str(int(diff//60)) + 'm ago')}"
+        if diff < 5:    return f"{G}just now{RST}"
+        if diff < 60:   return f"{c(DIM, str(int(diff)) + 's ago')}"
+        if diff < 3600: return f"{c(DIM, str(int(diff//60)) + 'm ago')}"
         return f"{c(DIM, str(int(diff//3600)) + 'h ago')}"
 
     def bar(mins: int, limit: int = 0, width: int = 20) -> str:
@@ -628,15 +650,16 @@ def cmd_traffic_live(args):
         now_str = datetime.now().strftime("%H:%M:%S")
         w = shutil.get_terminal_size().columns
 
+        # Use ansi_ljust so the box border aligns correctly despite ANSI codes
         lines.append(f"\n{C}╭{'─' * (w-2)}╮{RST}")
         title = f"  ◉  N E T W A T C H  ·  live traffic   {DIM}{now_str}{RST}"
-        lines.append(f"{C}│{RST}{title:<{w-2}}{C}│{RST}")
+        lines.append(f"{C}│{RST}{ansi_ljust(title, w-2)}{C}│{RST}")
         lines.append(f"{C}╰{'─' * (w-2)}╯{RST}")
         lines.append(f"  {DIM}Ctrl+C to exit   •   updates every 3s{RST}\n")
 
         watched_devs = tcfg.get("watched_devices", {})
-        # MAC → ip map for limit lookup
-        mac_for_ip = {d.get("ip"): mac for mac, d in devices.items()}
+        devs = _fresh_devices()
+        mac_for_ip = {d.get("ip"): mac for mac, d in devs.items()}
 
         if not last_seen:
             lines.append(f"  {DIM}Waiting for traffic...{RST}")
@@ -644,18 +667,14 @@ def cmd_traffic_live(args):
         else:
             for ip, (cat, svc, ts) in sorted(last_seen.items(),
                                               key=lambda x: -x[1][2]):
-                label   = get_label(ip)
-                col     = CAT_COL.get(cat, DIM)
-                icon    = CAT_ICON.get(cat, "·")
-                ago_str = time_ago(ts)
-                active  = time.time() - ts < 90   # active in last 90s
+                label  = get_label(ip)
+                col    = CAT_COL.get(cat, DIM)
+                icon   = CAT_ICON.get(cat, "·")
+                status = f"{G}● LIVE{RST}" if time.time() - ts < 10 else f"{Y}○ {time_ago(ts)}{RST}"
 
-                status  = f"{G}● LIVE{RST}" if time.time() - ts < 10 else f"{Y}○ {ago_str}{RST}"
-
-                lines.append(f"  {BOLD_W}{label:<22}{RST}  {status}")
+                lines.append(f"  {ansi_ljust(BOLD_W + label + RST, 24)}  {status}")
                 lines.append(f"    {col}{icon}  {cat:<10}  {W}{svc}{RST}")
 
-                # Show recent activity trail for this device
                 trail = list(recent[ip])[-6:]
                 if trail:
                     trail_str = "  ".join(
@@ -664,7 +683,6 @@ def cmd_traffic_live(args):
                     )
                     lines.append(f"    {DIM}recent:{RST}  {trail_str}")
 
-                # Show time limits if this is a watched device
                 mac = mac_for_ip.get(ip)
                 if mac and mac in watched_devs:
                     activity = load_json(ACTIVITY_FILE, {})
@@ -699,58 +717,52 @@ def cmd_traffic_live(args):
 
         tcfg = load_json(TRAFF_CFG, {})
         last_render = 0.0
-
-        # Parse journal lines in a background thread
-        import threading
         _lock = threading.Lock()
+        _tail_error: list = [None]
 
-        def parse_journal():
-            # Pattern from traffwatch log lines
-            # "NEW device" and "ALERT" lines won't appear here —
-            # we parse the INFO lines that traffic_monitor logs
-            # We tail the raw log file instead for richer data
-            pass
-
-        # Actually tail the raw log file for parsed events
         log_path = INSTALL_DIR / "traffwatch.log"
 
-        def tail_logfile():
-            """Tail the traffwatch.log file for domain hit events."""
-            try:
-                # Seek to end first
-                with open(log_path, "r") as f:
-                    f.seek(0, 2)
-                    while True:
-                        line = f.readline()
-                        if not line:
-                            time.sleep(0.1)
-                            continue
-                        # Parse lines like:
-                        # 2026-05-15 20:01:23,123 [INFO] 192.168.1.39 → YouTube (Video) youtube.com
-                        # We look for our custom log format from traffic_monitor
-                        m = re.search(
-                            r"(\d+\.\d+\.\d+\.\d+)\s+→\s+(.+?)\s+\((.+?)\)\s+(\S+)",
-                            line
-                        )
-                        if m:
-                            ip, svc, cat, domain = m.groups()
-                            ts = time.time()
-                            with _lock:
-                                recent[ip].append((ts, cat, svc))
-                                last_seen[ip] = (cat, svc, ts)
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
+        # Pattern: "192.168.1.x → Service (Category) domain"
+        _TRAFFIC_RE = re.compile(
+            r"(\d+\.\d+\.\d+\.\d+)\s+→\s+(.+?)\s+\((.+?)\)\s+(\S+)"
+        )
 
-        # Also parse DNS/SNI from journal directly as fallback
+        def tail_logfile():
+            """Tail traffwatch.log for domain hit events."""
+            backoff = 0.1
+            while True:
+                try:
+                    # Explicit UTF-8 — the log is always written with utf-8 encoding
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        f.seek(0, 2)   # jump to end; only show new events
+                        backoff = 0.1
+                        while True:
+                            line = f.readline()
+                            if not line:
+                                time.sleep(0.1)
+                                continue
+                            m = _TRAFFIC_RE.search(line)
+                            if m:
+                                ip, svc, cat, _ = m.groups()
+                                ts = time.time()
+                                with _lock:
+                                    recent[ip].append((ts, cat, svc))
+                                    last_seen[ip] = (cat, svc, ts)
+                except FileNotFoundError:
+                    _tail_error[0] = f"log not found: {log_path}"
+                    time.sleep(5)
+                except Exception as exc:
+                    _tail_error[0] = str(exc)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 10)
+
         def parse_journal_lines():
+            """Journal fallback — catches entries before log file is ready."""
+            _J_RE = re.compile(
+                r"(\d+\.\d+\.\d+\.\d+)\s+→\s+(.+?)\s+\((.+?)\)"
+            )
             for raw in proc.stdout:
-                # traffwatch logs: "WARNING: FLAG: Kid's iPad → PornHub (Adult)"
-                # and INFO hits we add below
-                m = re.search(
-                    r"(\d+\.\d+\.\d+\.\d+)\s+→\s+(.+?)\s+\((.+?)\)", raw
-                )
+                m = _J_RE.search(raw)
                 if m:
                     ip, svc, cat = m.groups()
                     ts = time.time()
@@ -758,12 +770,11 @@ def cmd_traffic_live(args):
                         recent[ip].append((ts, cat, svc))
                         last_seen[ip] = (cat, svc, ts)
 
-        t1 = threading.Thread(target=tail_logfile,       daemon=True)
+        t1 = threading.Thread(target=tail_logfile,        daemon=True)
         t2 = threading.Thread(target=parse_journal_lines, daemon=True)
         t1.start()
         t2.start()
 
-        # Render loop
         first = True
         while True:
             now = time.time()
@@ -771,11 +782,14 @@ def cmd_traffic_live(args):
                 tcfg = load_json(TRAFF_CFG, {})
                 with _lock:
                     output = render(dict(recent), dict(last_seen), tcfg)
+                # Append tail-error hint if the log thread hit a problem
+                err = _tail_error[0]
+                if err:
+                    output += f"\n  {R}⚠ log tail error: {err}{RST}\n"
                 if first:
                     print(CLEAR, end="")
                     first = False
                 else:
-                    # Count lines to move cursor up
                     line_count = output.count("\n") + 1
                     print(f"\033[{line_count}A\033[J", end="")
                 print(output, end="", flush=True)
