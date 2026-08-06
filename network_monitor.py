@@ -200,6 +200,7 @@ OUI_OS_MAP = {
     "CC:6D:A0": ("Tizen",                "Samsung TV"),
     # Routers
     "8C:13:E2": ("Linux (Router)",       "Netlink ICT Router"),
+    "0C:36:23": ("Linux (Router)",       "Sagemcom DSL Router"),
 }
 
 # Hostname pattern → OS guess
