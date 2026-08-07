@@ -528,6 +528,8 @@ def register_device(known: dict, device: dict, trusted_macs: list) -> dict:
             "os_notes":      smart["os_notes"],
         }
     else:
+        # Only fresh-scan fields are updated here — label/trusted/first_seen
+        # are intentionally left untouched so user-set values survive.
         known[mac].update({
             "ip":            device["ip"],
             "hostname":      device["hostname"] or known[mac].get("hostname", ""),
@@ -683,6 +685,12 @@ def run_scan(cfg: dict, known: dict) -> tuple[dict, list]:
     raw     = run_nmap(cfg["network_range"], cfg["nmap_flags"])
     if not raw:
         return known, []
+
+    # Reload from disk before merging: the daemon holds `known` in memory for
+    # its whole run, but `netwatch label`/`trust` write straight to
+    # known_devices.json between scans. Without this, the next save below
+    # would overwrite those edits with our stale in-memory copy.
+    known = load_known_devices()
 
     scanned = parse_nmap_output(raw)
     log.info("Scan complete — %d device(s) found online.", len(scanned))
