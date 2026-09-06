@@ -11,15 +11,20 @@
   Home Network Monitor — Arch Linux Hub
 ```
 
-A lightweight 24/7 network monitoring daemon built for an always-on Arch Linux hub.
-Uses **Nmap** to scan your LAN every 60 seconds, detects new and unknown devices
-instantly, and fires real-time alerts via **Telegram** — all manageable through
-a clean `netwatch` CLI.
+A lightweight 24/7 network monitoring suite built for an always-on Arch Linux hub.
+Three daemons, one `netwatch` CLI:
+
+- **NetWatch** — scans your LAN with Nmap, detects new/unknown devices
+- **TraffWatch** — sniffs DNS/TLS SNI to see what each device is doing, enforces time limits
+- **ThreatWatch** — runs Suricata IDS + VirusTotal lookups on intercepted traffic
+
+All three fire real-time alerts via **Telegram**.
 
 ---
 
 ## What it does
 
+**NetWatch (device discovery)**
 - Scans your home LAN continuously using Nmap
 - Detects any new device that connects to your network within 60 seconds
 - Identifies devices by **MAC address** — so even DHCP IP changes don't fool it
@@ -27,8 +32,26 @@ a clean `netwatch` CLI.
   vendor strings, and nmap fingerprinting to guess what kind of device joined
 - Sends an instant **Telegram alert** to your phone with device details
 - Stores a persistent registry of all known devices with labels you assign
-- Runs as a **systemd service** — starts on boot, restarts on failure, runs 24/7
-- Managed entirely through the `netwatch` root command
+
+**TraffWatch (traffic visibility)**
+- Passively sniffs DNS queries and TLS SNI via `tshark` — no per-app agent needed
+- Classifies traffic into categories (Video, Gaming, Social, Adult, Gambling, ...)
+- Tracks per-device daily usage and lets you set time limits (`traffic-watch <MAC> Gaming 60`)
+- Alerts on Telegram when a device hits its limit or visits a flagged category
+
+**ThreatWatch (intrusion detection)**
+- Runs **Suricata** (ETOpen ruleset) against LAN traffic for known-bad signatures
+- Enriches suspicious destination IPs via the **VirusTotal** API (cached, rate-limited)
+- Alerts on Telegram for high/critical severity hits, with a live threat dashboard
+
+**DNS interception (what makes TraffWatch/ThreatWatch see anything)**
+- ARP-spoofs the LAN so the hub sits in the traffic path, redirects DNS to itself
+- Blocks DNS-over-HTTPS/TLS (Cloudflare, Google, Quad9, AdGuard) so devices can't
+  bypass interception via encrypted DNS
+- Reversible with one script; a healthcheck timer self-heals if the MITM path drops
+
+All daemons run as **systemd services** — start on boot, restart on failure, run 24/7 —
+and are managed entirely through the `netwatch` root command.
 
 ---
 
@@ -75,33 +98,63 @@ iPhones and Android phones for privacy) are detected and flagged in alerts.
 ## Project structure
 
 ```
-~/netwatch-files/            ← your source directory
-├── network_monitor.py       ← the daemon (runs 24/7 as a systemd service)
-├── netwatch                 ← the CLI tool (installed to /usr/local/bin)
-├── config.json              ← configuration template
-├── netwatch.service         ← systemd unit file
-└── README.md                ← this file
+~/netwatch-files/                 ← your source directory
+├── netwatch                      ← the CLI tool (installed to /usr/local/bin)
+├── network_monitor.py            ← NetWatch daemon (device discovery)
+├── traffic_monitor.py            ← TraffWatch daemon (traffic classification)
+├── threat_monitor.py             ← ThreatWatch daemon (Suricata → VT → Telegram)
+├── config.json                   ← configuration template
+├── dns_intercept.sh              ← starts ARP spoof + DNS redirect + DoH/DoT block
+├── dns_unintercept.sh            ← reverts dns_intercept.sh
+├── netwatch_healthcheck.sh       ← verifies the MITM path is actually up, self-heals
+├── fix-new-router.sh             ← re-detects subnet/gateway after a router swap
+├── dnsmasq.conf                  ← DNS server config the hub runs once interception is on
+├── netwatch.service              ← systemd unit — NetWatch
+├── traffwatch.service            ← systemd unit — TraffWatch
+├── threatwatch.service           ← systemd unit — ThreatWatch
+├── netwatch-healthcheck.service / .timer   ← runs netwatch_healthcheck.sh every 5 min
+├── suricata/                     ← Suricata config templates + systemd/logrotate units
+├── test_threat_monitor.py        ← unit tests for threat_monitor.py
+└── README.md                     ← this file
 
-/opt/netwatch/               ← installation directory (live)
-├── network_monitor.py       ← daemon copy
-├── config.json              ← your live configuration
-├── known_devices.json       ← device registry (auto-created on first scan)
-├── scan_history.json        ← last 100 scans
-└── netwatch.log             ← local log file
+/opt/netwatch/                    ← installation directory (live)
+├── network_monitor.py / traffic_monitor.py / threat_monitor.py   ← daemon copies
+├── config.json                   ← your live configuration
+├── known_devices.json            ← device registry (auto-created on first scan)
+├── scan_history.json             ← last 100 scans
+├── activity_log.json / traffic_config.json   ← TraffWatch state + time limits
+├── vt_cache.json                 ← VirusTotal lookup cache
+└── *.log                         ← local log files
 
-/usr/local/bin/netwatch      ← CLI (makes `netwatch` work from anywhere)
-/etc/systemd/system/netwatch.service   ← systemd unit
+/home/suricata-logs/eve.json      ← Suricata's alert feed (read by ThreatWatch)
+/home/threatwatch/threats_log.jsonl   ← ThreatWatch's own alert log
+
+/usr/local/bin/netwatch           ← CLI (makes `netwatch` work from anywhere)
+/etc/systemd/system/{netwatch,traffwatch,threatwatch}.service   ← systemd units
 ```
 
 ---
 
 ## Requirements
 
+**NetWatch (core)**
 - Arch Linux (or any systemd-based Linux distro)
 - Python 3.8+
 - Nmap — `sudo pacman -S nmap`
 - Root access (nmap needs raw sockets for MAC detection)
 - A Telegram bot — optional but strongly recommended
+
+**TraffWatch (optional)**
+- `tshark` — `sudo pacman -S wireshark-cli` (installed automatically by `traffic-install`)
+
+**ThreatWatch (optional)**
+- `suricata`, `suricata-update`, `logrotate`
+- A free [VirusTotal](https://www.virustotal.com/) API key (500 lookups/day)
+
+**DNS interception (needed for TraffWatch/ThreatWatch to see anything)**
+- `nftables`, `dsniff` (for `arpspoof`), `dnsmasq`
+- Runs the hub as a MITM for the LAN — see [Security notes](#security-notes)
+  before enabling it.
 
 ---
 
@@ -147,6 +200,52 @@ netwatch status
 netwatch logs -f
 ```
 
+### 5. (Optional) Enable DNS interception
+
+TraffWatch and ThreatWatch can only see traffic that passes through the hub.
+Run this on the hub to ARP-spoof the LAN and redirect DNS to itself, and set
+up `dnsmasq` (`dnsmasq.conf`) as the local resolver first:
+
+```bash
+sudo cp dnsmasq.conf /etc/dnsmasq.conf   # edit `interface=` to match your hub's iface
+sudo systemctl enable --now dnsmasq
+sudo cp dns_intercept.sh dns_unintercept.sh netwatch_healthcheck.sh /opt/netwatch/
+sudo /opt/netwatch/dns_intercept.sh
+```
+
+To revert at any time: `sudo /opt/netwatch/dns_unintercept.sh`.
+Optionally install the healthcheck timer so the MITM path self-heals if
+`arpspoof` dies or the router changes:
+
+```bash
+sudo cp netwatch-healthcheck.service netwatch-healthcheck.timer /etc/systemd/system/
+sudo systemctl enable --now netwatch-healthcheck.timer
+```
+
+If you swap routers later, re-run `sudo bash fix-new-router.sh` to
+re-detect the subnet/gateway and merge your device history forward.
+
+### 6. (Optional) Install TraffWatch
+
+```bash
+sudo netwatch traffic-install
+sudo netwatch traffic-start
+sudo netwatch traffic-watch <MAC> Gaming 60   # alert after 60 min/day
+netwatch traffic-live                          # see what's happening now
+```
+
+### 7. (Optional) Install ThreatWatch
+
+```bash
+sudo nano /opt/netwatch/config.json   # set threatwatch.virustotal_api_key
+sudo netwatch threat-install
+netwatch threats-status
+```
+
+`threat-install` auto-detects your interface/subnet, installs Suricata with
+the ETOpen ruleset, and enables the `suricata`, `suricata-update.timer`,
+`logrotate.timer`, and `threatwatch` services.
+
 ---
 
 ## Configuration reference
@@ -181,6 +280,13 @@ netwatch logs -f
     },
     "local_log": { "enabled": true },
     "desktop_notify": { "enabled": false }
+  },
+
+  "threatwatch": {
+    "virustotal_api_key": "",
+    "severity_threshold": 2,
+    "alert_cooldown_minutes": 5,
+    "vt_cache_ttl_hours": 24
   }
 }
 ```
@@ -194,6 +300,14 @@ netwatch logs -f
 | `scan_on_start` | `true` | Scan immediately when daemon starts |
 | `alert_on_reconnect` | `false` | Alert when a known device rejoins |
 | `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` |
+| `threatwatch.virustotal_api_key` | `""` | Your VirusTotal API key (required for `threats-lookup` + enrichment) |
+| `threatwatch.severity_threshold` | `2` | Alert on Suricata severity `<=` this (1=critical, 2=high) |
+| `threatwatch.alert_cooldown_minutes` | `5` | Minimum gap between repeat Telegram alerts for the same signature/dest |
+| `threatwatch.vt_cache_ttl_hours` | `24` | How long a VirusTotal result is cached before re-querying |
+
+TraffWatch's own settings (time limits, watched categories) live separately
+in `/opt/netwatch/traffic_config.json`, managed via `netwatch traffic-watch` /
+`traffic-unwatch` rather than hand-edited.
 
 ### Nmap flag guide
 
@@ -371,6 +485,31 @@ Commands marked **root** require `sudo`.
 | `netwatch config` | — | Show current config summary |
 | `netwatch test-telegram` | — | Send a test Telegram message |
 
+### TraffWatch
+
+| Command | Root | Description |
+|---------|------|--------------|
+| `sudo netwatch traffic-install` | ✅ | Install `tshark` + the TraffWatch service |
+| `sudo netwatch traffic-start` / `-stop` / `-restart` | ✅ | Service control |
+| `netwatch traffic` | — | Today's activity for all devices |
+| `netwatch traffic-live` | — | Live dashboard — what each device is doing now |
+| `netwatch traffic-activity <MAC> [-d days]` | — | Activity history for one device |
+| `netwatch traffic-limits` | — | Show all configured time limits |
+| `sudo netwatch traffic-watch <MAC> <Category> <mins>` | ✅ | Set a daily time limit (e.g. `Gaming 60`) |
+| `sudo netwatch traffic-unwatch <MAC> [Category]` | ✅ | Remove a time limit |
+| `netwatch traffic-logs [-f] [-n N]` | — | TraffWatch service logs |
+
+### ThreatWatch
+
+| Command | Root | Description |
+|---------|------|--------------|
+| `sudo netwatch threat-install` | ✅ | Install Suricata + the ThreatWatch service |
+| `netwatch threats` | — | Today's threat summary (top targets/signatures/categories) |
+| `netwatch threats-live` | — | Live threat dashboard |
+| `netwatch threats-history [-n days]` | — | Threats grouped by day |
+| `netwatch threats-lookup <IP>` | — | Manually query VirusTotal for an IP |
+| `netwatch threats-status` | — | Suricata/ThreatWatch health, rule count, VT quota |
+
 ### Setup
 
 | Command | Root | Description |
@@ -464,14 +603,22 @@ details — your service can act on them however you want.
 
 ## Security notes
 
-- Your Telegram bot token gives full bot control. Never commit `config.json`
-  to a public repository. Add it to `.gitignore`.
+- Your Telegram bot token and VirusTotal API key give real access — never commit
+  `config.json` to a public repository. Add it to `.gitignore`.
 - `known_devices.json` contains MAC addresses of every device on your network.
   Treat it as sensitive — store it only on the hub.
-- NetWatch is a **read-only monitoring tool**. It does not block, throttle,
-  or modify any network traffic.
-- The systemd service runs as root. This is required for nmap raw sockets
-  and is standard for network daemons on home lab systems.
+- NetWatch's device scanner is **read-only**. It does not block, throttle, or
+  modify traffic on its own.
+- DNS interception (`dns_intercept.sh`) is **not** read-only: it ARP-spoofs the
+  entire LAN so the hub becomes a man-in-the-middle for every device's traffic,
+  redirects their DNS to the hub, and drops outbound DoH/DoT to keep them from
+  bypassing it. This is the only way TraffWatch/ThreatWatch can see traffic —
+  only enable it on a network you own and control, and only for family devices
+  you have the right to monitor. `sudo /opt/netwatch/dns_unintercept.sh` reverts
+  it instantly.
+- The systemd services run as root. This is required for nmap raw sockets,
+  ARP spoofing, and packet capture, and is standard for network daemons on
+  home lab systems.
 
 ---
 
